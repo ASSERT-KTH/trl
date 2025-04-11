@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-__version__ = "0.17.1.dev0"
+__version__ = "0.17.0.dev0"
 
 from typing import TYPE_CHECKING
 
@@ -44,9 +44,6 @@ _import_structure = {
         "is_rich_available",
         "is_unsloth_available",
         "is_vllm_available",
-    ],
-    "logging_utils": [
-        "build_html_table",
     ],
     "models": [
         "SUPPORTED_ARCHITECTURES",
@@ -150,11 +147,6 @@ if TYPE_CHECKING:
         is_rich_available,
         is_unsloth_available,
         is_vllm_available,
-    )
-    from .logging_utils import (
-        TRLLogger,
-        create_logger,
-        log_trainer_config,
     )
     from .models import (
         SUPPORTED_ARCHITECTURES,

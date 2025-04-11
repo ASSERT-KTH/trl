@@ -41,13 +41,10 @@ from transformers import (
 from transformers.integrations.deepspeed import is_deepspeed_zero3_enabled
 from transformers.utils import is_peft_available
 
-from trl.agent_manager import AgentManager
-
 from ..data_utils import apply_chat_template, is_conversational, maybe_apply_chat_template
 from ..extras.profiling import profiling_context, profiling_decorator
 from ..extras.vllm_client import VLLMClient
 from ..import_utils import is_deepspeed_available, is_rich_available, is_vllm_available
-from ..logging_utils import build_html_table
 from ..models import create_reference_model, prepare_deepspeed, unwrap_model_for_generation
 from .callbacks import SyncRefModelCallback
 from .grpo_config import GRPOConfig
@@ -272,10 +269,6 @@ class GRPOTrainer(Trainer):
             model and a scheduler given by [`get_linear_schedule_with_warmup`] controlled by `args`.
         peft_config ([`~peft.PeftConfig`], *optional*, defaults to `None`):
             PEFT configuration used to wrap the model. If `None`, the model is not wrapped.
-        agent_manager ([`AgentManager`], *optional*, defaults to `None`):
-            If provided, then it overrides the normal vllm_client.generate method. The manager wraps a pre-existing LLM
-            scaffolding (such as an Aider Coder) to directly train the model inside the scaffolding it would be used
-            in a production environment.
     """
 
     _tag_names = ["trl", "grpo"]
@@ -292,8 +285,6 @@ class GRPOTrainer(Trainer):
         callbacks: Optional[list[TrainerCallback]] = None,
         optimizers: tuple[Optional[torch.optim.Optimizer], Optional[torch.optim.lr_scheduler.LambdaLR]] = (None, None),
         peft_config: Optional["PeftConfig"] = None,
-        # Agent manager
-        agent_manager: Optional[AgentManager] = None,  # if provided, then used (overrides the normal vllm_client.generate method)
     ):
         # Args
         if args is None:
@@ -449,7 +440,6 @@ class GRPOTrainer(Trainer):
             callbacks=callbacks,
             optimizers=optimizers,
         )
-        self.agent_manager = agent_manager
 
         # Check if the per_device_train/eval_batch_size * num processes can be divided by the number of generations
         num_processes = self.accelerator.num_processes
@@ -699,8 +689,6 @@ class GRPOTrainer(Trainer):
         prompt_inputs = super()._prepare_inputs(prompt_inputs)
         prompt_ids, prompt_mask = prompt_inputs["input_ids"], prompt_inputs["attention_mask"]
 
-        answers_text = [x["answer"] for x in inputs]
-
         if self.max_prompt_length is not None:
             prompt_ids = prompt_ids[:, -self.max_prompt_length :]
             prompt_mask = prompt_mask[:, -self.max_prompt_length :]
@@ -714,50 +702,25 @@ class GRPOTrainer(Trainer):
 
             # Generate completions using vLLM: gather all prompts and use them in a single call in the main process
             all_prompts_text = gather_object(prompts_text)
-            all_inputs = gather_object(inputs)
-            
             if self.accelerator.is_main_process:
-                
-                if not self.agent_manager:
-                    # Since 'prompts' contains 'num_generations' duplicates, we first take unique prompts, and generate
-                    # num_generations outputs for each one. This is faster than generating outputs for each duplicate
-                    # prompt individually.
-                    ordered_set_of_prompts = all_prompts_text[:: self.num_generations]
-                    with profiling_context(self, "vLLM.generate"):
-                        completion_ids = self.vllm_client.generate(
-                            prompts=ordered_set_of_prompts,
-                            n=self.num_generations,
-                            repetition_penalty=self.repetition_penalty,
-                            temperature=self.temperature,
-                            top_p=self.top_p,
-                            top_k=-1 if self.top_k is None else self.top_k,
-                            min_p=0.0 if self.min_p is None else self.min_p,
-                            max_tokens=self.max_completion_length,
-                            guided_decoding_regex=self.guided_decoding_regex,
-                        )
-                else:
-                    # Since we are no longer doing prompt -> n completions, we cannot simply specify n=num_generations to our
-                    # generate method. Instead, we simply treat each duplicate prompt as a separate prompt.                    
-                    with profiling_context(self, "AgentManager.deploy"):
-                        # Agents deployed in paralell, returns when last finishes or timeout is reached
-                        agent_histories = self.agent_manager.deploy(
-                            prompts=all_inputs,
-                            timeout=self.max_completion_length / 60  # Assume 60 tokens per second
-                        )
-                        # Format agent histories into a list of messages
-                        agent_histories_formatted = [maybe_apply_chat_template(history, self.processing_class)["messages"] for history in agent_histories]
-                        # Should have the same exact dtype as the normal vllm_client.generate() output (TODO: Double check)
-                        completion_ids = self.processing_class(
-                            text=agent_histories_formatted,
-                            return_tensors="pt",
-                            padding=True,
-                            padding_side="left",
-                            add_special_tokens=False
-                        )["input_ids"]
-                        
+                # Since 'prompts' contains 'num_generations' duplicates, we first take unique prompts, and generate
+                # num_generations outputs for each one. This is faster than generating outputs for each duplicate
+                # prompt individually.
+                ordered_set_of_prompts = all_prompts_text[:: self.num_generations]
+                with profiling_context(self, "vLLM.generate"):
+                    completion_ids = self.vllm_client.generate(
+                        prompts=ordered_set_of_prompts,
+                        n=self.num_generations,
+                        repetition_penalty=self.repetition_penalty,
+                        temperature=self.temperature,
+                        top_p=self.top_p,
+                        top_k=-1 if self.top_k is None else self.top_k,
+                        min_p=0.0 if self.min_p is None else self.min_p,
+                        max_tokens=self.max_completion_length,
+                        guided_decoding_regex=self.guided_decoding_regex,
+                    )
             else:
                 completion_ids = [None] * len(all_prompts_text)
-                
             # Broadcast the completions from the main process to all processes, ensuring each process receives its
             # corresponding slice.
             completion_ids = broadcast_object_list(completion_ids, from_process=0)
@@ -944,7 +907,6 @@ class GRPOTrainer(Trainer):
         if self.log_completions and self.state.global_step % self.args.logging_steps == 0:
             prompts_to_log = gather_object(prompts_text)
             completions_to_log = gather_object(completions_text)
-            answers_to_log = gather_object(answers_text)
             rewards_to_log = {
                 reward_func_name: rewards_per_func[:, i] for i, reward_func_name in enumerate(reward_func_names)
             }
@@ -959,14 +921,19 @@ class GRPOTrainer(Trainer):
                         self.num_completions_to_print,
                     )
                 if self.args.report_to and "wandb" in self.args.report_to and wandb.run is not None:
+                    import pandas as pd
+
                     # For logging
                     table = {
+                        "step": [str(self.state.global_step)] * len(rewards),
                         "prompt": prompts_to_log,
-                        "response": completions_to_log,
-                        "correct": answers_to_log,
+                        "completion": completions_to_log,
                         "reward": rewards.tolist(),
                     }
-                    wandb.log({"completions_table": wandb.Html(build_html_table(table))})
+                    df = pd.DataFrame(table)
+                    if self.args.wandb_log_unique_prompts:
+                        df = df.drop_duplicates(subset=["prompt"])
+                    wandb.log({"completions": wandb.Table(dataframe=df)})
 
         return {
             "prompt_ids": prompt_ids,

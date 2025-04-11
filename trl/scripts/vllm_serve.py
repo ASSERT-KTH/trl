@@ -22,12 +22,7 @@ import torch
 import torch.distributed as dist
 
 from trl import TrlParser
-from trl.import_utils import (
-    is_fastapi_available,
-    is_pydantic_available,
-    is_uvicorn_available,
-    is_vllm_available,
-)
+from trl.import_utils import is_fastapi_available, is_pydantic_available, is_uvicorn_available, is_vllm_available
 
 
 if is_fastapi_available():
@@ -97,17 +92,13 @@ class WeightSyncWorker(Worker):
                 Total number of participating processes in the update group.
         """
         if self.pynccl_comm is not None:
-            raise RuntimeError(
-                "Weight update group already initialized. Call close_communicator first."
-            )
+            raise RuntimeError("Weight update group already initialized. Call close_communicator first.")
 
         # Get the rank of the current worker in the global world group.
         rank = get_world_group().rank
 
         # Create a stateless process group to manage communication between training processes and vLLM workers.
-        pg = StatelessProcessGroup.create(
-            host=host, port=port, rank=rank, world_size=world_size
-        )
+        pg = StatelessProcessGroup.create(host=host, port=port, rank=rank, world_size=world_size)
 
         # Initialize the NCCL-based communicator for weight synchronization.
         self.pynccl_comm = PyNcclCommunicator(pg, device=self.device)
@@ -115,9 +106,7 @@ class WeightSyncWorker(Worker):
         # The client process that sends updated weights has the highest rank (world_size - 1).
         self.client_rank = world_size - 1
 
-    def update_named_param(
-        self, name: str, dtype: torch.dtype, shape: Sequence[int]
-    ) -> None:
+    def update_named_param(self, name: str, dtype: torch.dtype, shape: Sequence[int]) -> None:
         """
         Receives updated weights from the client process and updates the named parameter in the model.
 
@@ -130,17 +119,13 @@ class WeightSyncWorker(Worker):
                 Shape of the weight tensor.
         """
         if self.pynccl_comm is None:
-            raise RuntimeError(
-                "Communicator not initialized. Call `init_communicator` first."
-            )
+            raise RuntimeError("Communicator not initialized. Call `init_communicator` first.")
 
         # Allocate memory for the incoming weight tensor on the correct device.
         weight = torch.empty(shape, dtype=dtype, device=self.device)
 
         # Use NCCL to broadcast the updated weights from the client (src) to all workers.
-        self.pynccl_comm.broadcast(
-            weight, src=self.client_rank, stream=torch.cuda.current_stream()
-        )
+        self.pynccl_comm.broadcast(weight, src=self.client_rank, stream=torch.cuda.current_stream())
         self.pynccl_comm.group.barrier()
 
         # Load the received weights into the model.
@@ -195,9 +180,7 @@ class ScriptArguments:
     model: str = field(metadata={"help": "Model name or path to load the model from."})
     revision: Optional[str] = field(
         default=None,
-        metadata={
-            "help": "Revision to use for the model. If not specified, the default branch will be used."
-        },
+        metadata={"help": "Revision to use for the model. If not specified, the default branch will be used."},
     )
     tensor_parallel_size: int = field(
         default=1,
@@ -261,9 +244,7 @@ def main(script_args: ScriptArguments):
         )
 
     if not is_vllm_available():
-        raise ImportError(
-            "vLLM is required to run the vLLM serve script. Please install it using `pip install vllm`."
-        )
+        raise ImportError("vLLM is required to run the vLLM serve script. Please install it using `pip install vllm`.")
 
     llm = LLM(
         model=script_args.model,
@@ -303,9 +284,7 @@ def main(script_args: ScriptArguments):
         {"tensor_parallel_size": 8}
         ```
         """
-        return {
-            "tensor_parallel_size": llm.llm_engine.parallel_config.tensor_parallel_size
-        }
+        return {"tensor_parallel_size": llm.llm_engine.parallel_config.tensor_parallel_size}
 
     class GenerateRequest(BaseModel):
         prompts: list[str]
@@ -347,9 +326,7 @@ def main(script_args: ScriptArguments):
 
         # Guided decoding, if enabled
         if request.guided_decoding_regex is not None:
-            guided_decoding = GuidedDecodingParams(
-                backend="outlines", regex=request.guided_decoding_regex
-            )
+            guided_decoding = GuidedDecodingParams(backend="outlines", regex=request.guided_decoding_regex)
         else:
             guided_decoding = None
 
@@ -365,11 +342,7 @@ def main(script_args: ScriptArguments):
             guided_decoding=guided_decoding,
         )
         all_outputs = llm.generate(request.prompts, sampling_params=sampling_params)
-        completion_ids = [
-            list(output.token_ids)
-            for outputs in all_outputs
-            for output in outputs.outputs
-        ]
+        completion_ids = [list(output.token_ids) for outputs in all_outputs for output in outputs.outputs]
         return {"completion_ids": completion_ids}
 
     class InitCommunicatorRequest(BaseModel):
@@ -378,9 +351,7 @@ def main(script_args: ScriptArguments):
         world_size: int
 
     @app.post("/init_communicator/")
-    async def init_communicator(
-        request: InitCommunicatorRequest, background_tasks: BackgroundTasks
-    ):
+    async def init_communicator(request: InitCommunicatorRequest, background_tasks: BackgroundTasks):
         """
         Initializes the communicator for synchronizing model weights between a client and multiple server
         workers.
@@ -404,9 +375,7 @@ def main(script_args: ScriptArguments):
         shape: list[int]
 
     @app.post("/update_named_param/")
-    async def update_named_param(
-        request: UpdateWeightsRequest, background_tasks: BackgroundTasks
-    ):
+    async def update_named_param(request: UpdateWeightsRequest, background_tasks: BackgroundTasks):
         """
         Updates the model weights with the provided tensor.
 
@@ -425,11 +394,7 @@ def main(script_args: ScriptArguments):
         # And with background_tasks.add_task we need to call it this way:
         # background_tasks.add_task(llm.collective_rpc, "update_named_param", args=("name", torch.float32, (10, 10)))
         dtype = torch.__getattribute__(request.dtype.split(".")[-1])
-        background_tasks.add_task(
-            llm.collective_rpc,
-            "update_named_param",
-            args=(request.name, dtype, request.shape),
-        )
+        background_tasks.add_task(llm.collective_rpc, "update_named_param", args=(request.name, dtype, request.shape))
 
         return {"message": "Request received, updating named parameter"}
 
@@ -439,10 +404,7 @@ def main(script_args: ScriptArguments):
         Resets the prefix cache for the model.
         """
         success = llm.llm_engine.reset_prefix_cache()
-        return {
-            "message": "Request received, resetting prefix cache status: "
-            + str(success)
-        }
+        return {"message": "Request received, resetting prefix cache status: " + str(success)}
 
     @app.post("/close_communicator/")
     async def close_communicator():
@@ -460,11 +422,7 @@ def main(script_args: ScriptArguments):
 
 def make_parser(subparsers: argparse._SubParsersAction = None):
     if subparsers is not None:
-        parser = subparsers.add_parser(
-            "vllm-serve",
-            help="Run the vLLM serve script",
-            dataclass_types=ScriptArguments,
-        )
+        parser = subparsers.add_parser("vllm-serve", help="Run the vLLM serve script", dataclass_types=ScriptArguments)
     else:
         parser = TrlParser(ScriptArguments)
     return parser
