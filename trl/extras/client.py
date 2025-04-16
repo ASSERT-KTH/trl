@@ -20,6 +20,7 @@ from abc import ABC, abstractmethod
 
 import torch
 from torch import nn
+from transformers import PreTrainedModel
 
 from ..import_utils import is_requests_available, is_vllm_available
 
@@ -37,7 +38,21 @@ if is_vllm_available():
 logger = logging.getLogger(__name__)
 
 
-class VLLMClient(ABC):
+class Client(ABC):
+    """The client is what generates the completions for the model to be trained on."""
+    @abstractmethod
+    def generate(self, data: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        pass
+    
+class TransformersClient(Client):
+    def __init__(self, model: PreTrainedModel):
+        self.model = model
+        
+    def generate(self, data: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        pass
+
+
+class VLLMClient(Client):
     """
     A client class to interact with a vLLM server.
 
@@ -130,44 +145,6 @@ class VLLMClient(ABC):
             logger.info(f"Server is not up yet. Retrying in {retry_interval} seconds...")
             time.sleep(retry_interval)
 
-    def generate(
-        self,
-        data: list[dict[str, Any]],
-        repetition_penalty: float = 1.0,
-        temperature: float = 1.0,
-        top_p: float = 1.0,
-        top_k: int = -1,
-        min_p: float = 0.0,
-        max_tokens: int = 16,
-        guided_decoding_regex: Optional[str] = None,
-    ) -> list[dict[str, Any]]:
-        """
-        Generates model completions for the provided data.
-
-        Args:
-            data (`list[dict[str, Any]]`):
-                List of dataset entries.
-            repetition_penalty (`float`, *optional*, defaults to `1.0`):
-                Parameter for repetition penalty. 1.0 means no penalty.
-            temperature (`float`, *optional*, defaults to `1.0`):
-                Temperature parameter for sampling. Higher values increase diversity.
-            top_p (`float`, *optional*, defaults to `1.0`):
-                Top-p sampling parameter.`1.0` means no truncation.
-            top_k (`int`, *optional*, defaults to `-1`):
-                Top-k sampling parameter. `-1` means no truncation.
-            min_p (`float`, *optional*, defaults to `0.0`):
-                Minimum probability for sampling.
-            max_tokens (`int`, *optional*, defaults to `16`):
-                Maximum number of tokens to generate for each prompt.
-            guided_decoding_regex (`str` or `None`, *optional*, defaults to `None`):
-                Regular expression to guide the decoding process.
-
-        Returns:
-            `list[dict[str, Any]]`:
-                List of dataset entries with the generated completions added.
-        """
-        pass
-
     def init_communicator(self):
         """
         Initializes the weight update group in a distributed setup for model synchronization.
@@ -244,8 +221,11 @@ class VLLMClient(ABC):
         if response.status_code != 200:
             raise Exception(f"Request failed: {response.status_code}, {response.text}")
         
+class SyncVLLMClient(VLLMClient):
+    def generate(self, data: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        pass
         
-class SimpleClient(VLLMClient):
+class AsyncVLLMClient(VLLMClient):
     def generate(
         self,
         data: list[dict[str, Any]],
