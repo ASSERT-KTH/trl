@@ -1,0 +1,22 @@
+# Core dependencies from trl
+accelerate>=0.34.0
+datasets>=3.0.0
+transformers>=4.46.0
+
+# vLLM server dependencies
+vllm>=0.8.3
+fastapi
+pydantic
+uvicorn
+
+# Benchmark-specific dependencies
+torch>=2.0.0
+numpy>=1.22.0
+pandas>=1.4.0
+matplotlib>=3.5.0
+seaborn>=0.11.0
+requests>=2.27.0
+psutil>=5.9.0
+
+# Optional dependencies that might be useful
+peft>=0.8.0  # For weight updates 

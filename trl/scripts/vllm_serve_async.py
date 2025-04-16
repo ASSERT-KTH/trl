@@ -142,7 +142,7 @@ def add_vllm_client_endpoints(app: FastAPI, llm: AsyncLLM):
         background_tasks.add_task(
             llm.engine_core.collective_rpc,
             "init_communicator",
-            args=(request.host, request.port, script_args.tensor_parallel_size + 1),
+            args=(request.host, request.port, llm.llm_engine.parallel_config.tensor_parallel_size + 1),
         )
         return {"message": "Request received, initializing communicator"}
 
