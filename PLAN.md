@@ -1,99 +1,111 @@
-# PLAN.md
+# `Client` Abstraction – Design Alternatives  
+*(focus: GRPOTrainer generation path)*
 
-## Agent Manager Architecture
+## Context  
 
-### Core Concept
-The `AgentManager` coordinates ephemeral agents that exist only for the duration of a single training example, replacing `vllm_client.generate()` in the GRPO trainer with an orchestration layer that captures full conversation histories for more effective reinforcement learning.
+We want to support advanced roll‑out engines that live **outside** the learner’s
+PyTorch process (vLLM sync / async, tool‑using agents, etc.).  
+The question is how broadly to apply the new `Client` abstraction.
 
-### Current Implementation
+---
 
-1. **API Middleware Proxy**
-   - Lightweight FastAPI server that intercepts API calls between agents and vLLM
-   - Injects and tracks conversation via custom `X-Agent-ID` headers
-   - Maintains thread-safe conversation history per agent
-   - Captures complete request/response pairs for RL training signal
+## Option 1 – _Remote‑Only_ `Client`  
 
-2. **Multiprocessing Approach**
-   - Uses `multiprocessing.Pool` for parallel agent execution
-   - Each agent runs in an isolated process to prevent state contamination
-   - Monkey-patches the `requests` library to inject agent identification headers
-   - Process isolation ensures clean environment for each agent instance
+**Idea**  
+• Keep today’s in‑process `model.generate` path exactly as is.  
+• Introduce `Client` solely for **out‑of‑process** actors.  
+  *Examples*: `VLLMSyncClient`, `VLLMAsyncClient`, `AiderClient`, …  
 
-3. **Agent Deployment Flow**
-   ```
-   GRPO Training Step
-   └── AgentManager.deploy(prompts)
-       ├── Generate unique agent_id for each prompt
-       ├── Deploy agents via multiprocessing.Pool
-       │   ├── Each process runs _process_one(agent_id, prompt)
-       │   │   ├── Monkey-patch requests to add X-Agent-ID
-       │   │   └── Call process_one() (e.g., Aider instance)
-       │   └── Multiple agents run in parallel
-       ├── API Proxy tracks all vLLM interactions
-       ├── Await completion with timeout
-       ├── Collect conversation histories for all agent_ids
-       └── Return structured completions to GRPO trainer
-   ```
+**Pros**  
+• Zero impact on the majority of users who do not use vLLM.  
+• No extra indirection for the fast, simple path.  
+• Very small diff in GRPOTrainer (one new branch based on presence of a
+  `remote_client`).  
+• Clear mental model:  "`Client` = RPC actor".
 
-4. **GRPO Integration**
-   - GRPO trainer uses AgentManager.deploy() for generating completions
-   - Should properly convert agent completions to token IDs for the training loop
-   - Maintains compatibility with both direct vLLM and agent-based generation
+**Cons / Risks**  
+• Two separate generation code paths remain in the trainer (local vs remote);
+  any future feature (e.g. new sampling arg) must be updated in both.  
+• If someone later wants "server‑less but still via `Client`" (e.g. to run the
+  actor on a CPU node) a new `TransformersClient` would still be needed,
+  re‑introducing dual paths.  
 
-## Challenges and Solutions
+---
 
-### Conversation Tracking Challenges
+## Option 2 – _Universal_ `Client`  
 
-1. **Asynchronous API Calls**
-   - Agents make varying numbers of API calls at unpredictable times
-   - Solution: Thread-safe conversation tracking with unique agent IDs
-   - Thread-safe locking ensures proper history capture even with concurrent requests
+**Idea**  
+• Every generation call, even in‑process HF, goes through a `Client` object.  
+  Add a lightweight `TransformersClient`.  
+• Trainer decides once in `__init__` which concrete client to use; all later
+  code is path‑agnostic.
 
-2. **Process Management**
-   - Challenge: Ensuring clean process termination and resource cleanup
-   - Solution: Pool-based multiprocessing with timeout handling
-   - Proper cleanup in finally blocks ensures resources are released
+**Pros**  
+• Trainer's forward pass becomes single‑path and slightly shorter.  
+• Any new sampling feature or logging tweak is added in one place (clients),
+  not in trainer branches.  
+• Users can swap in custom generation strategies without touching trainer
+  code, even when they remain in‑process.
 
-3. **Proxy Synchronization**
-   - Challenge: Background tasks in FastAPI may create race conditions
-   - Solution: Consider making conversation tracking synchronous in the API endpoint
-   - More robust synchronization mechanisms for production environments
+**Cons / Risks**  
+• Introduces an extra layer for everyone, even when not needed.  
+  (Minor runtime overhead; conceptual overhead in code reading.)  
+• Slightly higher barrier for contributors who now must add a client to
+  change generation behaviour.  
 
-4. **Conversation Continuity**
-   - Challenge: Ensuring continuous context across multiple API calls
-   - Solution: Implement validation in the ConversationTracker
-   - Track and report potential discontinuities that could indicate information loss
+---
 
-### Technical Considerations
+## Summary of Trade‑offs  
 
-1. **Monkey-Patching Approach**
-   - Current: Patch `requests.request` in each worker process to add custom headers
-   - Pros: Isolated impact, minimal invasiveness to agent frameworks
-   - Alternative: Require direct configuration of agent framework
+| Criterion                  | Option 1 (Remote‑only) | Option 2 (Universal) |
+|----------------------------|------------------------|----------------------|
+| Backwards compatibility    | ✅ identical behaviour | ✅ identical behaviour |
+| Trainer LOC / complexity   | ↔ same LOC, dual path  | 🔽 single path |
+| Learning curve (new users) | ✅ familiar HF call     | ⚠ learn `Client` indirection |
+| Extensibility (future)     | ⚠ may need new path    | ✅ plug‑and‑play |
+| Risk of unforeseen bugs    | lower (fewer changes)  | slightly higher initially |
 
-2. **Conversation Collection**
-   - Current: API Proxy collects all conversations by agent_id
-   - Challenge: Ensuring all API calls are captured before retrieving history
-   - Solution: Consider small delay or synchronization primitive before retrieval
+---
 
-3. **Error Handling**
-   - Challenge: Individual agent failures shouldn't crash the entire batch
-   - Solution: Improved error handling in AgentManager.deploy()
-   - Graceful degradation for failed agents while allowing others to continue
+## Open Questions  
 
-## Conclusions and Next Steps
+1. How frequently will users need to override **in‑process** generation
+   behaviour (e.g. for customised sampling)?  
+   • Rare  → Option 1 is safer.  
+   • Common → Option 2 pays off quickly.
 
-The current implementation successfully achieves:
+2. Do we expect other trainers (PPO, DPO, etc.) to adopt the same abstraction?
+   • If yes, a universal client may unify code bases.
 
-1. **Process Isolation**: Clean separation of agent environments
-2. **Conversation Tracking**: Complete history capture for RL training
-3. **Parallel Execution**: Efficient handling of multiple agents
-4. **Resource Management**: Proper cleanup of temporary resources
+3. Long‑term maintenance preference in TRL core: favour minimal patches or
+   uniform interfaces?
 
-Next development priorities:
+---
 
-1. **Implement ConversationTracker.get_completion_history()**: Properly extract and format the complete history
-2. **Address race conditions**: Ensure background tasks complete before history retrieval
-3. **Enhance error handling**: Improve robustness to individual agent failures
-4. **Performance optimization**: Evaluate and optimize latency introduced by the proxy
-5. **Testing**: Develop comprehensive tests for conversation tracking accuracy
+## Known Hurdles  
+
+**EOS masking**  
+* Current trainer masks all tokens after the *first* `eos_token_id` in the completion.  
+* Multi‑step roll‑outs that stuff several assistant turns into one `completion` therefore lose everything after the first `<|im_end|>` / EOS.  
+  * Safe workaround: return only the latest assistant turn as the completion and move earlier turns into the prompt.  
+  * Alternative: revise masking to keep tokens up to the **last** EOS; impacts loss, KL, reward logic.  
+
+**Server lifecycle & fault tolerance**  
+* Remote clients stall until the server is reachable; unclear UX if the server crashes mid‑epoch.  
+* Need timeout / retry logic and clear error propagation back to the trainer.  
+
+**Tokeniser & pad‑token mismatches**  
+* Reward models may define different `pad_token_id`; they must be aligned when computing log‑probs.  
+* Clients should return either already‑padded `completion_ids` or supply a compatible pad value.  
+
+**Conversation length & truncation**  
+* Long multi‑step histories can exceed `max_prompt_length`; trainer truncates **from the left**.  
+* Agents relying on very early context might silently lose critical info.  
+
+**Sampling parameter drift**  
+* Future clients may add new decoding knobs; they should accept—but may ignore—unknown kwargs so that the trainer stays version‑stable.
+
+---
+
+*Decision deferred.*  Both options remain viable; final choice depends on
+maintainer bandwidth and expected user mix.
