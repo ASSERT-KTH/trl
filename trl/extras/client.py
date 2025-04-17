@@ -44,12 +44,12 @@ class Client(ABC):
     def generate(self, data: list[dict[str, Any]]) -> list[dict[str, Any]]:
         pass
     
-class TransformersClient(Client):
-    def __init__(self, model: PreTrainedModel, generation_config: GenerationConfig, accelerator: Accelerator):
-        self.model = model
+# class TransformersClient(Client):
+#     def __init__(self, model: PreTrainedModel, generation_config: GenerationConfig, accelerator: Accelerator):
+#         self.model = model
         
-    def generate(self, data: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        pass
+#     def generate(self, data: list[dict[str, Any]]) -> list[dict[str, Any]]:
+#         pass
 
 
 class VLLMClient(Client):
