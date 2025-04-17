@@ -30,7 +30,6 @@ Usage:
 """
 
 import argparse
-import csv
 import json
 import logging
 import os

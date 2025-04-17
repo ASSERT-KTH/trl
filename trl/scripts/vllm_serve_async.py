@@ -48,6 +48,7 @@ standard OpenAI API calls) and synchronize weights (using the TRL-specific endpo
 
 import os
 import signal
+import argparse
 
 import torch
 
@@ -120,7 +121,7 @@ def add_vllm_client_endpoints(app: FastAPI, llm: AsyncLLM):
         {"tensor_parallel_size": 8}
         ```
         """
-        return {"tensor_parallel_size": llm.llm_engine.parallel_config.tensor_parallel_size}
+        return {"tensor_parallel_size": llm.llm_engine.vllm_config.parallel_config.tensor_parallel_size}
 
     class InitCommunicatorRequest(BaseModel):
         host: str
@@ -142,7 +143,7 @@ def add_vllm_client_endpoints(app: FastAPI, llm: AsyncLLM):
         background_tasks.add_task(
             llm.engine_core.collective_rpc,
             "init_communicator",
-            args=(request.host, request.port, llm.llm_engine.parallel_config.tensor_parallel_size + 1),
+            args=(request.host, request.port, llm.llm_engine.vllm_config.parallel_config.tensor_parallel_size + 1),
         )
         return {"message": "Request received, initializing communicator"}
 
@@ -289,15 +290,34 @@ async def run_server(args, **uvicorn_kwargs):
         await shutdown_task
     finally:
         sock.close()
+        
+def make_parser(subparsers: argparse._SubParsersAction = None):
+    if subparsers is not None:
+        parser = subparsers.add_parser("vllm-serve-async", 
+                                      help="Run the vLLM OpenAI-compatible serve script with async endpoints")
+        # Use vLLM's make_arg_parser to add the arguments
+        parser = make_arg_parser(parser)
+    else:
+        # Create a new parser directly
+        parser = FlexibleArgumentParser(
+            description="vLLM OpenAI-Compatible RESTful API server with weight syncing.")
+        parser = make_arg_parser(parser)
+    return parser
 
-
-if __name__ == "__main__":
+def main(script_args=None):
     cli_env_setup()
-    parser = FlexibleArgumentParser(
-        description="vLLM OpenAI-Compatible RESTful API server with weight syncing.")
-    parser = make_arg_parser(parser)
-    args = parser.parse_args()
+    
+    if script_args is None:
+        parser = make_parser()
+        args = parser.parse_args()
+    else:
+        args = script_args
+        
+    args.worker_extension_cls="trl.scripts.vllm_serve_sync.WeightSyncWorkerExtension"
     validate_parsed_serve_args(args)
 
     uvloop.run(run_server(args))
+
+if __name__ == "__main__":
+    main()
 
