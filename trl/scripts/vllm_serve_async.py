@@ -293,14 +293,10 @@ async def run_server(args, **uvicorn_kwargs):
         
 def make_parser(subparsers: argparse._SubParsersAction = None):
     if subparsers is not None:
-        parser = subparsers.add_parser("vllm-serve-async", 
-                                      help="Run the vLLM OpenAI-compatible serve script with async endpoints")
-        # Use vLLM's make_arg_parser to add the arguments
+        parser = subparsers.add_parser("vllm-serve-async", help="Run the vLLM OpenAI-compatible serve script with async endpoints")
         parser = make_arg_parser(parser)
     else:
-        # Create a new parser directly
-        parser = FlexibleArgumentParser(
-            description="vLLM OpenAI-Compatible RESTful API server with weight syncing.")
+        parser = FlexibleArgumentParser(description="vLLM OpenAI-Compatible RESTful API server with weight syncing.")
         parser = make_arg_parser(parser)
     return parser
 
