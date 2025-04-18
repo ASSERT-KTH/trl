@@ -44,7 +44,7 @@ from transformers.utils import is_peft_available
 
 from ..data_utils import apply_chat_template, is_conversational, maybe_apply_chat_template
 from ..extras.profiling import profiling_context, profiling_decorator
-from ..extras.client import VLLMClient
+from ..extras.vllm_client import VLLMClient
 from ..import_utils import is_deepspeed_available, is_liger_kernel_available, is_rich_available, is_vllm_available
 from ..models import create_reference_model, prepare_deepspeed, unwrap_model_for_generation
 from .callbacks import SyncRefModelCallback
@@ -281,6 +281,7 @@ class GRPOTrainer(Trainer):
         self,
         model: Union[str, PreTrainedModel],
         reward_funcs: Union[RewardFunc, list[RewardFunc]],
+
         args: Optional[GRPOConfig] = None,
         train_dataset: Optional[Union[Dataset, IterableDataset]] = None,
         eval_dataset: Optional[Union[Dataset, IterableDataset, dict[str, Union[Dataset, IterableDataset]]]] = None,

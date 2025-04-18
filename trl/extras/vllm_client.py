@@ -20,7 +20,6 @@ from abc import ABC, abstractmethod
 
 import torch
 from torch import nn
-from transformers import PreTrainedModel
 
 from ..import_utils import is_requests_available, is_vllm_available
 
@@ -38,26 +37,27 @@ if is_vllm_available():
 logger = logging.getLogger(__name__)
 
 
-class Client(ABC):
-    """The client is what generates the completions for the model to be trained on."""
-    @abstractmethod
-    def generate(self, data: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        pass
-    
-# class TransformersClient(Client):
-#     def __init__(self, model: PreTrainedModel, generation_config: GenerationConfig, accelerator: Accelerator):
-#         self.model = model
-        
-#     def generate(self, data: list[dict[str, Any]]) -> list[dict[str, Any]]:
-#         pass
-
-
-class VLLMClient(Client):
+class VLLMClient:
     """
-    A client class to interact with a vLLM server.
+    An abstract base class for clients to interact with a vLLM server.
 
+    A client is responsible for generating model completions that will be used for training.
+    It abstracts away how and where the generations happen.
+    
     This class provides methods to generate completions, initialize and manage weight update groups, and update model
     weights in a distributed setting. Before using it, start the vLLM server with `trl vllm-serve`.
+    
+    (This pattern could be extended to also wrap a local, Transformers, model, but that feels overengineered.)
+
+    Implementations:
+    - SyncVLLMClient: For synchronous, batched, generation using a vLLM server
+        - Faster, but more limited in which types of rollouts we can generate
+        - This is exactly the same as the previous `VLLMClient`
+    - AsyncVLLMClient: For asynchronous, generation using a vLLM server
+        - Slower, but more flexible
+        - Behaves like a normal, OpenAI-compatible, API server
+        - By extending this class, it allows plug-and-play of any service that interacts with an OpenAI-compatible API
+        - To models "in-situ"
 
     Args:
         host (`str`, *optional*, defaults to `"0.0.0.0"`):
@@ -111,6 +111,10 @@ class VLLMClient(Client):
         self.init_communicator()
         atexit.register(self.close_communicator)  # when the client object is deleted, close the weight update group
 
+    @abstractmethod
+    def generate(self, *args, **kwargs):  # would be better to standardize the arguments, but that would be a breaking change
+        pass
+    
     def check_server(self, total_timeout: float = 0.0, retry_interval: float = 2.0):
         """
         Check server availability with retries on failure, within a total timeout duration. If the server is not up
@@ -220,8 +224,7 @@ class VLLMClient(Client):
         response = self.session.post(url)
         if response.status_code != 200:
             raise Exception(f"Request failed: {response.status_code}, {response.text}")
-        
-class SyncVLLMClient(VLLMClient):
+
     def generate(
         self,
         prompts: list[str],
@@ -281,7 +284,76 @@ class SyncVLLMClient(VLLMClient):
         else:
             raise Exception(f"Request failed: {response.status_code}, {response.text}")
         
-class AsyncVLLMClient(VLLMClient):
+class AsyncVLLMClient(ABC, VLLMClient):
+    """
+    An abstract base class for clients that interact with an asynchronous, OpenAI-compatible API server.
+
+    This client facilitates interaction with backends like the server started by `trl vllm-serve-async`,
+    allowing generation tasks to run separately from the main training process. It is designed to 
+    decouple complex rollout logic from the trainer.
+
+    The key motivation is to provide a standardized interface (`generate`) that users can implement
+    to execute custom, potentially stateful or environment-interacting, generation strategies.
+    Instead of just passing prompts, this client's `generate` method receives a list of data dictionaries
+    and is expected to return the list with generation results added or modified within each dictionary.
+    This enables more sophisticated data handling during rollouts without altering the trainer's core loop.
+
+    Compared to the synchronous `VLLMClient` (optimized for simple, batched prompt completions),
+    `AsyncVLLMClient` offers flexibility for scenarios where each generation might involve unique
+    logic, external calls, or state management, running these potentially slower operations asynchronously.
+    This approach aims to lower the barrier for integrating complex agent behaviors or specialized
+    data processing directly into TRL's training workflows.
+
+    While primarily handling generation logic, it retains the capability from `VLLMClient` to manage
+    distributed weight synchronization if the backend server (like `trl vllm-serve-async`) supports it.
+
+    Args:
+        host (`str`, *optional*, defaults to `"0.0.0.0"`):
+            IP address of the vLLM server.
+        server_port (`int`, *optional*, defaults to `8000`):
+            Port number of the vLLM server.
+        group_port (`int`, *optional*, defaults to `51216`):
+            Port number for the weight update group.
+        connection_timeout (`float`, *optional*, defaults to `0.0`):
+            Total timeout duration in seconds to wait for the server to be up. If the server is not up after the
+            timeout, a `ConnectionError` is raised.
+
+    Examples:
+        Run the asynchronous vLLM server with the model `Qwen/Qwen2.5-7B`:
+
+        ```bash
+        $ trl vllm-serve-async --model Qwen/Qwen2.5-7B
+        ...
+        INFO:     Application startup complete.
+        INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+        ```
+
+        Then, define a custom client inheriting from `AsyncVLLMClient`:
+
+        ```python
+        from typing import Any, List, Dict
+        from trl.extras.vllm_client import AsyncVLLMClient
+
+        class CustomRolloutClient(AsyncVLLMClient):
+            def generate(self, data: List[Dict[str, Any]], **kwargs) -> List[Dict[str, Any]]:
+                # Simulate adding a 'completion' field to each dictionary
+                for item in data:
+                    item["completion"] = f"Generated output for {item.get('prompt', '')}..."
+                return data
+
+
+        >>> client = CustomRolloutClient()
+        >>> data_samples = [{"id": 1, "prompt": "Explain quantum physics briefly"}, {"id": 2, "prompt": "Write a short poem about AI"}]
+        >>> results = client.generate(data_samples)
+        >>> print(results)
+        [{'id': 1, 'prompt': ..., 'completion': 'Generated output...'}, {'id': 2, ...}]
+
+        >>> from transformers import AutoModelForCausalLM
+        >>> model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen2.5-7B", device_map="cuda")
+        >>> client.update_model_params(model)
+        ```
+    """
+    @abstractmethod
     def generate(
         self,
         data: list[dict[str, Any]],
@@ -294,7 +366,11 @@ class AsyncVLLMClient(VLLMClient):
         guided_decoding_regex: Optional[str] = None,
     ) -> list[dict[str, Any]]:
         """
-        Generates model completions for the provided data.
+        Generates model completions or executes custom logic based on the provided data.
+
+        This method receives a list of dictionaries, processes each one (potentially asynchronously
+        or in parallel), and returns the list with added/modified generation results within
+        each dictionary. Subclasses must implement their specific generation logic here.
 
         Args:
             data (`list[dict[str, Any]]`):
@@ -316,41 +392,13 @@ class AsyncVLLMClient(VLLMClient):
 
         Returns:
             `list[dict[str, Any]]`:
-                List of dataset entries with the generated completions added.
+                The list of input dictionaries, where each dictionary has been updated
+                with the results of the generation process. Each dictionary must include a
+                `'completion'` key containing the generated text, and may include other
+                custom outputs as needed.
         """
-        url = f"http://{self.host}:{self.server_port}/v1/chat/completions"
-        headers = {"Authorization": "Bearer dummy"}
-
-        def get_answer(item):
-            messages = [
-                {"role": "system", "content": "You are a helpful AI assistant."},
-                {"role": "user", "content": item["prompt"]}
-            ]
-            payload = {
-                "model": "deployed_model",
-                "messages": messages,
-                "temperature": temperature,
-                "max_tokens": max_tokens,
-                "repetition_penalty": repetition_penalty,
-                "top_p": top_p,
-                "top_k": top_k,
-                "min_p": min_p,
-                "stream": False
-            }
-            if guided_decoding_regex is not None:
-                payload["guided_decoding_regex"] = guided_decoding_regex
-                
-            resp = requests.post(url, json=payload, headers=headers, timeout=timeoaut)
-            resp.raise_for_status()
-            resp_data = resp.json()
-            return resp_data["choices"][0]["message"]["content"]
-
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            futures = [executor.submit(get_answer, item) for item in data]
-            for item, future in zip(data, futures):
-                item["answer"] = future.result()
-
-        return data
+        prompts = [x["prompt"] for x in data]
+        prompts_text = [maybe_apply_chat_template(example, self.processing_class)["prompt"] for example in data]
         
 
 
