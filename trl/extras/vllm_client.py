@@ -37,7 +37,7 @@ if is_vllm_available():
 logger = logging.getLogger(__name__)
 
 
-class VLLMClient:
+class BaseVLLMClient(ABC):
     """
     An abstract base class for clients to interact with a vLLM server.
 
@@ -224,10 +224,21 @@ class VLLMClient:
         response = self.session.post(url)
         if response.status_code != 200:
             raise Exception(f"Request failed: {response.status_code}, {response.text}")
+        
+    @abstractmethod
+    def generate(self, data: list[dict], **kwargs) -> list[dict]:
+        ...
+        
+class VLLMClient(BaseVLLMClient):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        
+        if not requests.head(f"http://{self.host}:{self.server_port}/generate/").ok:
+            raise Exception("Incorrect server configuration. Please use `trl vllm-serve` to start the server.")
 
     def generate(
         self,
-        prompts: list[str],
+        data,
         n: int = 1,
         repetition_penalty: float = 1.0,
         temperature: float = 1.0,
@@ -268,7 +279,7 @@ class VLLMClient:
         response = self.session.post(
             url,
             json={
-                "prompts": prompts,
+                "prompts": data,
                 "n": n,
                 "repetition_penalty": repetition_penalty,
                 "temperature": temperature,
@@ -280,125 +291,16 @@ class VLLMClient:
             },
         )
         if response.status_code == 200:
-            return response.json()["completion_ids"]
+            return response.json()
         else:
             raise Exception(f"Request failed: {response.status_code}, {response.text}")
         
-class AsyncVLLMClient(ABC, VLLMClient):
-    """
-    An abstract base class for clients that interact with an asynchronous, OpenAI-compatible API server.
-
-    This client facilitates interaction with backends like the server started by `trl vllm-serve-async`,
-    allowing generation tasks to run separately from the main training process. It is designed to 
-    decouple complex rollout logic from the trainer.
-
-    The key motivation is to provide a standardized interface (`generate`) that users can implement
-    to execute custom, potentially stateful or environment-interacting, generation strategies.
-    Instead of just passing prompts, this client's `generate` method receives a list of data dictionaries
-    and is expected to return the list with generation results added or modified within each dictionary.
-    This enables more sophisticated data handling during rollouts without altering the trainer's core loop.
-
-    Compared to the synchronous `VLLMClient` (optimized for simple, batched prompt completions),
-    `AsyncVLLMClient` offers flexibility for scenarios where each generation might involve unique
-    logic, external calls, or state management, running these potentially slower operations asynchronously.
-    This approach aims to lower the barrier for integrating complex agent behaviors or specialized
-    data processing directly into TRL's training workflows.
-
-    While primarily handling generation logic, it retains the capability from `VLLMClient` to manage
-    distributed weight synchronization if the backend server (like `trl vllm-serve-async`) supports it.
-
-    Args:
-        host (`str`, *optional*, defaults to `"0.0.0.0"`):
-            IP address of the vLLM server.
-        server_port (`int`, *optional*, defaults to `8000`):
-            Port number of the vLLM server.
-        group_port (`int`, *optional*, defaults to `51216`):
-            Port number for the weight update group.
-        connection_timeout (`float`, *optional*, defaults to `0.0`):
-            Total timeout duration in seconds to wait for the server to be up. If the server is not up after the
-            timeout, a `ConnectionError` is raised.
-
-    Examples:
-        Run the asynchronous vLLM server with the model `Qwen/Qwen2.5-7B`:
-
-        ```bash
-        $ trl vllm-serve-async --model Qwen/Qwen2.5-7B
-        ...
-        INFO:     Application startup complete.
-        INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
-        ```
-
-        Then, define a custom client inheriting from `AsyncVLLMClient`:
-
-        ```python
-        from typing import Any, List, Dict
-        from trl.extras.vllm_client import AsyncVLLMClient
-
-        class CustomRolloutClient(AsyncVLLMClient):
-            def generate(self, data: List[Dict[str, Any]], **kwargs) -> List[Dict[str, Any]]:
-                # Simulate adding a 'completion' field to each dictionary
-                for item in data:
-                    item["completion"] = f"Generated output for {item.get('prompt', '')}..."
-                return data
-
-
-        >>> client = CustomRolloutClient()
-        >>> data_samples = [{"id": 1, "prompt": "Explain quantum physics briefly"}, {"id": 2, "prompt": "Write a short poem about AI"}]
-        >>> results = client.generate(data_samples)
-        >>> print(results)
-        [{'id': 1, 'prompt': ..., 'completion': 'Generated output...'}, {'id': 2, ...}]
-
-        >>> from transformers import AutoModelForCausalLM
-        >>> model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen2.5-7B", device_map="cuda")
-        >>> client.update_model_params(model)
-        ```
-    """
-    @abstractmethod
-    def generate(
-        self,
-        data: list[dict[str, Any]],
-        repetition_penalty: float = 1.0,
-        temperature: float = 1.0,
-        top_p: float = 1.0,
-        top_k: int = -1,
-        min_p: float = 0.0,
-        max_tokens: int = 16,
-        guided_decoding_regex: Optional[str] = None,
-    ) -> list[dict[str, Any]]:
-        """
-        Generates model completions or executes custom logic based on the provided data.
-
-        This method receives a list of dictionaries, processes each one (potentially asynchronously
-        or in parallel), and returns the list with added/modified generation results within
-        each dictionary. Subclasses must implement their specific generation logic here.
-
-        Args:
-            data (`list[dict[str, Any]]`):
-                List of dataset entries.
-            repetition_penalty (`float`, *optional*, defaults to `1.0`):
-                Parameter for repetition penalty. 1.0 means no penalty.
-            temperature (`float`, *optional*, defaults to `1.0`):
-                Temperature parameter for sampling. Higher values increase diversity.
-            top_p (`float`, *optional*, defaults to `1.0`):
-                Top-p sampling parameter.`1.0` means no truncation.
-            top_k (`int`, *optional*, defaults to `-1`):
-                Top-k sampling parameter. `-1` means no truncation.
-            min_p (`float`, *optional*, defaults to `0.0`):
-                Minimum probability for sampling.
-            max_tokens (`int`, *optional*, defaults to `16`):
-                Maximum number of tokens to generate for each prompt.
-            guided_decoding_regex (`str` or `None`, *optional*, defaults to `None`):
-                Regular expression to guide the decoding process.
-
-        Returns:
-            `list[dict[str, Any]]`:
-                The list of input dictionaries, where each dictionary has been updated
-                with the results of the generation process. Each dictionary must include a
-                `'completion'` key containing the generated text, and may include other
-                custom outputs as needed.
-        """
-        prompts = [x["prompt"] for x in data]
-        prompts_text = [maybe_apply_chat_template(example, self.processing_class)["prompt"] for example in data]
+class AsyncVLLMClient(BaseVLLMClient):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        
+        if not requests.head(f"http://{self.host}:{self.server_port}/v1/chat/completions").ok:
+            raise Exception("Incorrect server configuration. Please use `trl vllm-serve-async` to start the server.")
         
 
 
