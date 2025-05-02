@@ -422,6 +422,7 @@ class GRPOTrainer(Trainer):
         self.loss_type = args.loss_type
         self.scale_rewards = args.scale_rewards
         self.mask_truncated_completions = args.mask_truncated_completions
+        self.multi_turn = True
 
         # Datasets
         if (
@@ -754,96 +755,73 @@ class GRPOTrainer(Trainer):
         self, inputs: dict[str, Union[torch.Tensor, Any]]
     ) -> dict[str, Union[torch.Tensor, Any]]:
         device = self.accelerator.device
-        prompts = [x["prompt"] for x in inputs]
-        prompts_text = [maybe_apply_chat_template(example, self.processing_class)["prompt"] for example in inputs]
-        prompt_inputs = self.processing_class(
-            text=prompts_text, return_tensors="pt", padding=True, padding_side="left", add_special_tokens=False
-        )
-        prompt_inputs = super()._prepare_inputs(prompt_inputs)
-        prompt_ids, prompt_mask = prompt_inputs["input_ids"], prompt_inputs["attention_mask"]
 
-        if self.max_prompt_length is not None:
-            prompt_ids = prompt_ids[:, -self.max_prompt_length :]
-            prompt_mask = prompt_mask[:, -self.max_prompt_length :]
+        # First, have main process load weights if needed
+        if self.state.global_step != self._last_loaded_step:
+            self._move_model_to_vllm()
+            self._last_loaded_step = self.state.global_step
 
-        # Generate completions using either vLLM or regular generation
-        if self.use_vllm:
-            # First, have main process load weights if needed
-            if self.state.global_step != self._last_loaded_step:
-                self._move_model_to_vllm()
-                self._last_loaded_step = self.state.global_step
-
-            # Generate completions using vLLM: gather all prompts and use them in a single call in the main process
-            all_prompts_text = gather_object(prompts_text)
-            if self.accelerator.is_main_process:
-                if isinstance(self.vllm_client, AsyncVLLMClient):
-                    outputs = self.vllm_client.generate(
-                        data=inputs,
-                        repetition_penalty=self.repetition_penalty,
-                        temperature=self.temperature,
-                        top_p=self.top_p,
-                        top_k=-1 if self.top_k is None else self.top_k,
-                        min_p=0.0 if self.min_p is None else self.min_p,
-                        max_tokens=self.max_completion_length,
-                        guided_decoding_regex=self.guided_decoding_regex,
-                    )
-                    completions = outputs["completions"]
-                    completions_ids = [self.processing_class.encode(completion) for completion in completions]
-
-                elif isinstance(self.vllm_client, VLLMClient):
-                    # This block will handle only VLLMClient instances (that are not AsyncVLLMClient)
-                    ordered_set_of_prompts = all_prompts_text[:: self.num_generations]
-                    with profiling_context(self, "vLLM.generate"):
-                        completion_ids = self.vllm_client.generate(
-                            data=ordered_set_of_prompts,
-                            n=self.num_generations,
-                            repetition_penalty=self.repetition_penalty,
-                            temperature=self.temperature,
-                            top_p=self.top_p,
-                            top_k=-1 if self.top_k is None else self.top_k,
-                            min_p=0.0 if self.min_p is None else self.min_p,
-                            max_tokens=self.max_completion_length,
-                            guided_decoding_regex=self.guided_decoding_regex,
-                        )
-                    # outputs = self.vllm_client.generate(inputs)
-                    # completion_ids = outputs["completions"]  # Required
-            else:
-                completion_ids = [None] * len(all_prompts_text)
-            # Broadcast the completions from the main process to all processes, ensuring each process receives its
-            # corresponding slice.
-            completion_ids = broadcast_object_list(completion_ids, from_process=0)
-            process_slice = slice(
-                self.accelerator.process_index * len(prompts),
-                (self.accelerator.process_index + 1) * len(prompts),
-            )
-            completion_ids = completion_ids[process_slice]
-
-            # Pad the completions, and concatenate them with the prompts
-            completion_ids = [torch.tensor(ids, device=device) for ids in completion_ids]
-            completion_ids = pad(completion_ids, padding_value=self.processing_class.pad_token_id)
-            prompt_completion_ids = torch.cat([prompt_ids, completion_ids], dim=1)
-        else:
-            # Regular generation path
-            with unwrap_model_for_generation(
-                self.model_wrapped, self.accelerator, gather_deepspeed3_params=self.args.ds3_gather_for_generation
-            ) as unwrapped_model:
-                prompt_completion_ids = unwrapped_model.generate(
-                    prompt_ids, attention_mask=prompt_mask, generation_config=self.generation_config
+        # Generate completions using vLLM: gather all prompts and use them in a single call in the main process
+        all_inputs = gather_object(inputs)
+        if self.accelerator.is_main_process:
+            if isinstance(self.vllm_client, AsyncVLLMClient):
+                outputs = self.vllm_client.generate(
+                    data=all_inputs,
+                    repetition_penalty=self.repetition_penalty,
+                    temperature=self.temperature,
+                    top_p=self.top_p,
+                    top_k=-1 if self.top_k is None else self.top_k,
+                    min_p=0.0 if self.min_p is None else self.min_p,
+                    max_tokens=self.max_completion_length,
+                    guided_decoding_regex=self.guided_decoding_regex,
                 )
+                inputs.update(outputs)
+                histories = [o["history"] for o in outputs]
+                prompts = [h[0] for h in histories]  # only mask away the system prompt
+                completions = [h[1:] for h in histories]
 
-            outputs = {}
-            # Compute prompt length and extract completion ids
-            prompt_length = prompt_ids.size(1)
-            prompt_ids = prompt_completion_ids[:, :prompt_length]
-            completion_ids = prompt_completion_ids[:, prompt_length:]
+
+                prompts_text = [self.processing_class.apply_chat_template(example, tokenize=False) for example in inputs]
+                prompt_inputs = self.processing_class(
+                    text=prompts_text, return_tensors="pt", padding=True, padding_side="left", add_special_tokens=False
+                )
+                prompt_ids, prompt_mask = prompt_inputs["input_ids"], prompt_inputs["attention_mask"]
+
+                completions_text = [self.processing_class.apply_chat_template(example, tokenize=False) for example in completions]
+                completion_inputs = self.processing_class(text=completions_text, padding=False)
+                completion_ids, completion_mask = completion_inputs["input_ids"], completion_inputs["attention_mask"]
+        else:
+            completion_ids = [None] * len(inputs)
+        # Broadcast the completions from the main process to all processes, ensuring each process receives its
+        # corresponding slice.
+        completion_ids = broadcast_object_list(completion_ids, from_process=0)
+        process_slice = slice(
+            self.accelerator.process_index * len(prompts),
+            (self.accelerator.process_index + 1) * len(prompts),
+        )
+        completion_ids = completion_ids[process_slice]
+
+        # Pad the completions, and concatenate them with the prompts
+        completion_ids = [torch.tensor(ids, device=device) for ids in completion_ids]
+        completion_lens = [len(ids) for ids in completion_ids]
+        completion_ids = pad(completion_ids, padding_value=self.processing_class.pad_token_id)
+        prompt_completion_ids = torch.cat([prompt_ids, completion_ids], dim=1)
+        
 
         # Mask everything after the first EOS token
         # TODO: We need to trigger this only if EOS is being used as padding? Right?
-        is_eos = completion_ids == self.processing_class.eos_token_id
-        eos_idx = torch.full((is_eos.size(0),), is_eos.size(1), dtype=torch.long, device=device)
-        eos_idx[is_eos.any(dim=1)] = is_eos.int().argmax(dim=1)[is_eos.any(dim=1)]
-        sequence_indices = torch.arange(is_eos.size(1), device=device).expand(is_eos.size(0), -1)
-        completion_mask = (sequence_indices <= eos_idx.unsqueeze(1)).int()
+        if self.multi_turn:
+            # Create an integer mask based on completion lengths to mask right padding tokens
+            max_completion_len = completion_ids.size(1)
+            indices = torch.arange(max_completion_len, device=device).expand(completion_ids.size(0), -1)
+            completion_lens_tensor = torch.tensor(completion_lens, device=device).unsqueeze(1)
+            completion_mask = (indices < completion_lens_tensor).int()  # all except last eos which is supposed to be there
+        else:
+            is_eos = completion_ids == self.processing_class.eos_token_id
+            eos_idx = torch.full((is_eos.size(0),), is_eos.size(1), dtype=torch.long, device=device)
+            eos_idx[is_eos.any(dim=1)] = is_eos.int().argmax(dim=1)[is_eos.any(dim=1)]
+            sequence_indices = torch.arange(is_eos.size(1), device=device).expand(is_eos.size(0), -1)
+            completion_mask = (sequence_indices <= eos_idx.unsqueeze(1)).int()
 
         # If mask_truncated_completions is enabled, zero out truncated completions in completion_mask
         if self.mask_truncated_completions:
