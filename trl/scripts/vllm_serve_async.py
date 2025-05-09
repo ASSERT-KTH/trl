@@ -291,25 +291,15 @@ async def run_server(args, **uvicorn_kwargs):
     finally:
         sock.close()
         
-def make_parser(subparsers: argparse._SubParsersAction = None):
-    if subparsers is not None:
-        parser = subparsers.add_parser("vllm-serve-async", help="Run the vLLM OpenAI-compatible serve script with async endpoints")
-        parser = make_arg_parser(parser)
-    else:
-        parser = FlexibleArgumentParser(description="vLLM OpenAI-Compatible RESTful API server with weight syncing.")
-        parser = make_arg_parser(parser)
-    return parser
 
-def main(script_args=None):
+def main():
     cli_env_setup()
     
-    if script_args is None:
-        parser = make_parser()
-        args = parser.parse_args()
-    else:
-        args = script_args
-        
+    parser = FlexibleArgumentParser(description="vLLM OpenAI-Compatible RESTful API server with weight syncing.")
+    parser = make_arg_parser(parser)
+    args = parser.parse_args()
     args.worker_extension_cls="trl.scripts.vllm_serve_sync.WeightSyncWorkerExtension"
+    
     validate_parsed_serve_args(args)
 
     uvloop.run(run_server(args))

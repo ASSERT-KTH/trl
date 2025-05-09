@@ -764,32 +764,30 @@ class GRPOTrainer(Trainer):
         # Generate completions using vLLM: gather all prompts and use them in a single call in the main process
         all_inputs = gather_object(inputs)
         if self.accelerator.is_main_process:
-            if isinstance(self.vllm_client, AsyncVLLMClient):
-                outputs = self.vllm_client.generate(
-                    data=all_inputs,
-                    repetition_penalty=self.repetition_penalty,
-                    temperature=self.temperature,
-                    top_p=self.top_p,
-                    top_k=-1 if self.top_k is None else self.top_k,
-                    min_p=0.0 if self.min_p is None else self.min_p,
-                    max_tokens=self.max_completion_length,
-                    guided_decoding_regex=self.guided_decoding_regex,
-                )
-                inputs.update(outputs)
-                histories = [o["history"] for o in outputs]
-                prompts = [h[0] for h in histories]  # only mask away the system prompt
-                completions = [h[1:] for h in histories]
+            outputs = self.vllm_client.generate(
+                data=all_inputs,
+                repetition_penalty=self.repetition_penalty,
+                temperature=self.temperature,
+                top_p=self.top_p,
+                top_k=-1 if self.top_k is None else self.top_k,
+                min_p=0.0 if self.min_p is None else self.min_p,
+                max_tokens=self.max_completion_length,
+                guided_decoding_regex=self.guided_decoding_regex,
+            )
+            histories = [o["history"] for o in outputs]
+            prompts = [h[0] for h in histories]  # only mask away the system prompt
+            completions = [h[1:] for h in histories]
 
 
-                prompts_text = [self.processing_class.apply_chat_template(example, tokenize=False) for example in inputs]
-                prompt_inputs = self.processing_class(
-                    text=prompts_text, return_tensors="pt", padding=True, padding_side="left", add_special_tokens=False
-                )
-                prompt_ids, prompt_mask = prompt_inputs["input_ids"], prompt_inputs["attention_mask"]
+            prompts_text = [self.processing_class.apply_chat_template(example, tokenize=False) for example in inputs]
+            prompt_inputs = self.processing_class(
+                text=prompts_text, return_tensors="pt", padding=True, padding_side="left", add_special_tokens=False
+            )
+            prompt_ids, prompt_mask = prompt_inputs["input_ids"], prompt_inputs["attention_mask"]
 
-                completions_text = [self.processing_class.apply_chat_template(example, tokenize=False) for example in completions]
-                completion_inputs = self.processing_class(text=completions_text, padding=False)
-                completion_ids, completion_mask = completion_inputs["input_ids"], completion_inputs["attention_mask"]
+            completions_text = [self.processing_class.apply_chat_template(example, tokenize=False) for example in completions]
+            completion_inputs = self.processing_class(text=completions_text, padding=False)
+            completion_ids, completion_mask = completion_inputs["input_ids"], completion_inputs["attention_mask"]
         else:
             completion_ids = [None] * len(inputs)
         # Broadcast the completions from the main process to all processes, ensuring each process receives its
@@ -892,7 +890,7 @@ class GRPOTrainer(Trainer):
                     # Repeat all input columns (but "prompt" and "completion") to match the number of generations
                     keys = [key for key in inputs[0] if key not in ["prompt", "completion"]]
                     reward_kwargs = {key: [example[key] for example in inputs] for key in keys}
-                    output_reward_func = reward_func(prompts=prompts, completions=completions, **reward_kwargs)
+                    output_reward_func = reward_func(prompts=prompts, completions=completions, **reward_kwargs, **outputs)
                     # Convert None values to NaN
                     output_reward_func = [reward if reward is not None else torch.nan for reward in output_reward_func]
 
