@@ -232,7 +232,6 @@ class BaseVLLMClient(Generates):
 
 # For now, always implement these downstream
 
-
 class VLLMClient(BaseVLLMClient):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -247,8 +246,7 @@ class AsyncVLLMClient(BaseVLLMClient):
         if not requests.head(f"http://{self.host}:{self.server_port}/v1/chat/completions").ok:
             raise Exception("Incorrect server configuration. Please use `trl vllm-serve-async` to start the server.")
         
-
-
+        
 # Example usage
 if __name__ == "__main__":
     from vllm import SamplingParams

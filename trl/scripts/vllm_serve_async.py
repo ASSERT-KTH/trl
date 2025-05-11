@@ -121,7 +121,7 @@ def add_vllm_client_endpoints(app: FastAPI, llm: AsyncLLM):
         {"tensor_parallel_size": 8}
         ```
         """
-        return {"tensor_parallel_size": llm.llm_engine.vllm_config.parallel_config.tensor_parallel_size}
+        return {"tensor_parallel_size": llm.vllm_config.parallel_config.tensor_parallel_size}
 
     class InitCommunicatorRequest(BaseModel):
         host: str
@@ -140,11 +140,18 @@ def add_vllm_client_endpoints(app: FastAPI, llm: AsyncLLM):
                 - `port` (`int`): Port number to be used for communication.
                 - `world_size` (`int`): Total number of participating processes in the group.
         """
+        import sys
+        sys.stderr.write(f"\n\n!!! ASYNC init_communicator START: host={request.host}, port={request.port}, world_size={request.world_size} !!!\n\n")
+        sys.stderr.flush()
+        
         background_tasks.add_task(
-            llm.engine_core.collective_rpc,
+            llm.engine_core.collective_rpc_async,
             "init_communicator",
-            args=(request.host, request.port, llm.llm_engine.vllm_config.parallel_config.tensor_parallel_size + 1),
+            args=(request.host, request.port, llm.vllm_config.parallel_config.tensor_parallel_size + 1),
         )
+        
+        sys.stderr.write("\n\n!!! ASYNC init_communicator BACKGROUND TASK ADDED !!!\n\n")
+        sys.stderr.flush()
         return {"message": "Request received, initializing communicator"}
 
     class UpdateWeightsRequest(BaseModel):
@@ -166,30 +173,48 @@ def add_vllm_client_endpoints(app: FastAPI, llm: AsyncLLM):
                 - `shape` (list of `int`): Shape of the weight
 
         """
+        import sys
+        sys.stderr.write(f"\n\n!!! ASYNC update_named_param START: name={request.name}, dtype={request.dtype}, shape={request.shape} !!!\n\n")
+        sys.stderr.flush()
+        
         # The function is called this way: update_named_param(name="name", dtype=torch.float32, shape=(10, 10))
         # So with collect_rpc we need to call it this way:
         # llm.collective_rpc("update_named_param", args=("name", torch.float32, (10, 10)))
         # And with background_tasks.add_task we need to call it this way:
         # background_tasks.add_task(llm.collective_rpc, "update_named_param", args=("name", torch.float32, (10, 10)))
         dtype = torch.__getattribute__(request.dtype.split(".")[-1])
-        background_tasks.add_task(llm.engine_core.collective_rpc, "update_named_param", args=(request.name, dtype, request.shape))
-
+        background_tasks.add_task(llm.engine_core.collective_rpc_async, "update_named_param", args=(request.name, dtype, request.shape))
+        
+        sys.stderr.write("\n\n!!! ASYNC update_named_param BACKGROUND TASK ADDED !!!\n\n")
+        sys.stderr.flush()
         return {"message": "Request received, updating named parameter"}
 
     @app.post("/reset_prefix_cache/")
-    async def reset_prefix_cache():
+    async def reset_prefix_cache(background_tasks: BackgroundTasks):
         """
         Resets the prefix cache for the model.
         """
-        success = llm.engine_core.reset_prefix_cache()
-        return {"message": "Request received, resetting prefix cache status: " + str(success)}
+        import sys
+        sys.stderr.write("\n\n!!! ASYNC RESET_PREFIX_CACHE STARTED !!!\n\n")
+        sys.stderr.flush()
+        background_tasks.add_task(llm.engine_core.reset_prefix_cache_async)
+        sys.stderr.write("\n\n!!! ASYNC RESET_PREFIX_CACHE BACKGROUND TASK ADDED !!!\n\n")
+        sys.stderr.flush()
+        return {"message": "Request received, resetting prefix cache"}
 
     @app.post("/close_communicator/")
     async def close_communicator():
         """
         Closes the weight update group and cleans up associated resources.
         """
-        llm.engine_core.collective_rpc("close_communicator")
+        import sys
+        sys.stderr.write("\n\n!!! ASYNC close_communicator START !!!\n\n")
+        sys.stderr.flush()
+        
+        llm.engine_core.collective_rpc_async("close_communicator")
+        
+        sys.stderr.write("\n\n!!! ASYNC close_communicator CALLED !!!\n\n")
+        sys.stderr.flush()
         return {"message": "Request received, closing communicator"}
 
 
@@ -254,8 +279,13 @@ async def run_server(args, **uvicorn_kwargs):
         app = build_app(args)
         add_vllm_client_endpoints(app, engine_client)
 
-        model_config = await engine_client.get_model_config()
-        await init_app_state(engine_client, model_config, app.state, args)
+        vllm_config = await engine_client.get_vllm_config()
+        print("\n"*10)
+        print(f"VLLM version: {VLLM_VERSION}")
+        print(f"vllm_config type: {type(vllm_config)}")
+        print("\n"*10)
+
+        await init_app_state(engine_client, vllm_config, app.state, args)
 
         def _listen_addr(a: str) -> str:
             if is_valid_ipv6_address(a):
@@ -293,6 +323,7 @@ async def run_server(args, **uvicorn_kwargs):
         
 
 def main():
+    print("WORKING"*1000)
     cli_env_setup()
     
     parser = FlexibleArgumentParser(description="vLLM OpenAI-Compatible RESTful API server with weight syncing.")
