@@ -95,20 +95,41 @@ class WeightSyncWorkerExtension:
             world_size (`int`):
                 Total number of participating processes in the update group.
         """
+        import sys
+        sys.stderr.write(f"\n\n!!! WeightSyncWorkerExtension.init_communicator START: host={host}, port={port}, world_size={world_size} !!!\n\n")
+        sys.stderr.flush()
+        
         if self.pynccl_comm is not None:
+            sys.stderr.write("\n\n!!! WeightSyncWorkerExtension.init_communicator ERROR: Weight update group already initialized !!!\n\n")
+            sys.stderr.flush()
             raise RuntimeError("Weight update group already initialized. Call close_communicator first.")
 
         # Get the rank of the current worker in the global world group.
         rank = get_world_group().rank
+        sys.stderr.write(f"\n\n!!! WeightSyncWorkerExtension.init_communicator: Current rank={rank} !!!\n\n")
+        sys.stderr.flush()
 
         # Create a stateless process group to manage communication between training processes and vLLM workers.
+        sys.stderr.write("\n\n!!! WeightSyncWorkerExtension.init_communicator: Creating StatelessProcessGroup... !!!\n\n")
+        sys.stderr.flush()
         pg = StatelessProcessGroup.create(host=host, port=port, rank=rank, world_size=world_size)
+        sys.stderr.write("\n\n!!! WeightSyncWorkerExtension.init_communicator: StatelessProcessGroup created !!!\n\n")
+        sys.stderr.flush()
 
         # Initialize the NCCL-based communicator for weight synchronization.
+        sys.stderr.write("\n\n!!! WeightSyncWorkerExtension.init_communicator: Initializing PyNcclCommunicator... !!!\n\n")
+        sys.stderr.flush()
         self.pynccl_comm = PyNcclCommunicator(pg, device=self.device)
+        sys.stderr.write("\n\n!!! WeightSyncWorkerExtension.init_communicator: PyNcclCommunicator initialized !!!\n\n")
+        sys.stderr.flush()
 
         # The client process that sends updated weights has the highest rank (world_size - 1).
         self.client_rank = world_size - 1
+        sys.stderr.write(f"\n\n!!! WeightSyncWorkerExtension.init_communicator: Client rank set to {self.client_rank} !!!\n\n")
+        sys.stderr.flush()
+        
+        sys.stderr.write("\n\n!!! WeightSyncWorkerExtension.init_communicator COMPLETE !!!\n\n")
+        sys.stderr.flush()
 
     def update_named_param(self, name: str, dtype: torch.dtype, shape: Sequence[int]) -> None:
         """
@@ -122,18 +143,40 @@ class WeightSyncWorkerExtension:
             shape (`Sequence[int]`):
                 Shape of the weight tensor.
         """
+        import sys
+        sys.stderr.write(f"\n\n!!! WeightSyncWorkerExtension.update_named_param START: name={name}, dtype={dtype}, shape={shape} !!!\n\n")
+        sys.stderr.flush()
+        
         if self.pynccl_comm is None:
+            sys.stderr.write("\n\n!!! WeightSyncWorkerExtension.update_named_param ERROR: Communicator not initialized !!!\n\n")
+            sys.stderr.flush()
             raise RuntimeError("Communicator not initialized. Call `init_communicator` first.")
 
         # Allocate memory for the incoming weight tensor on the correct device.
+        sys.stderr.write(f"\n\n!!! WeightSyncWorkerExtension.update_named_param: Allocating tensor on device={self.device} !!!\n\n")
+        sys.stderr.flush()
         weight = torch.empty(shape, dtype=dtype, device=self.device)
-
+        
         # Use NCCL to broadcast the updated weights from the client (src) to all workers.
+        sys.stderr.write(f"\n\n!!! WeightSyncWorkerExtension.update_named_param: Broadcasting weights from client_rank={self.client_rank} !!!\n\n")
+        sys.stderr.flush()
         self.pynccl_comm.broadcast(weight, src=self.client_rank)
+        sys.stderr.write("\n\n!!! WeightSyncWorkerExtension.update_named_param: Broadcast complete !!!\n\n")
+        sys.stderr.flush()
+        
         self.pynccl_comm.group.barrier()
+        sys.stderr.write("\n\n!!! WeightSyncWorkerExtension.update_named_param: Barrier complete !!!\n\n")
+        sys.stderr.flush()
 
         # Load the received weights into the model.
+        sys.stderr.write("\n\n!!! WeightSyncWorkerExtension.update_named_param: Loading weights into model !!!\n\n")
+        sys.stderr.flush()
         self.model_runner.model.load_weights(weights=[(name, weight)])
+        sys.stderr.write("\n\n!!! WeightSyncWorkerExtension.update_named_param: Weights loaded successfully !!!\n\n")
+        sys.stderr.flush()
+        
+        sys.stderr.write("\n\n!!! WeightSyncWorkerExtension.update_named_param COMPLETE !!!\n\n")
+        sys.stderr.flush()
 
     def close_communicator(self) -> None:
         """
@@ -141,11 +184,24 @@ class WeightSyncWorkerExtension:
 
         This method deletes the NCCL communicator to release associated resources.
         """
+        import sys
+        sys.stderr.write("\n\n!!! WeightSyncWorkerExtension.close_communicator START !!!\n\n")
+        sys.stderr.flush()
 
         if self.pynccl_comm is not None:
+            sys.stderr.write("\n\n!!! WeightSyncWorkerExtension.close_communicator: Deleting PyNcclCommunicator !!!\n\n")
+            sys.stderr.flush()
             del self.pynccl_comm
             self.pynccl_comm = None  # Ensure attribute is reset to None
             self.client_rank = None  # Ensure attribute is reset to None
+            sys.stderr.write("\n\n!!! WeightSyncWorkerExtension.close_communicator: Communicator deleted !!!\n\n")
+            sys.stderr.flush()
+        else:
+            sys.stderr.write("\n\n!!! WeightSyncWorkerExtension.close_communicator: No communicator to close !!!\n\n")
+            sys.stderr.flush()
+        
+        sys.stderr.write("\n\n!!! WeightSyncWorkerExtension.close_communicator COMPLETE !!!\n\n")
+        sys.stderr.flush()
 
 
 @dataclass
@@ -272,11 +328,19 @@ def llm_worker(
     script_args: ScriptArguments, data_parallel_rank: int, master_port: int, connection: Connection
 ) -> None:
     # Set required environment variables for DP to work with vLLM
+    import sys
+    sys.stderr.write(f"\n\n!!! llm_worker START: data_parallel_rank={data_parallel_rank}, master_port={master_port} !!!\n\n")
+    sys.stderr.flush()
+    
     os.environ["VLLM_DP_RANK"] = str(data_parallel_rank)
     os.environ["VLLM_DP_RANK_LOCAL"] = str(data_parallel_rank)
     os.environ["VLLM_DP_SIZE"] = str(script_args.data_parallel_size)
     os.environ["VLLM_DP_MASTER_PORT"] = str(master_port)
+    sys.stderr.write(f"\n\n!!! llm_worker: Set environment variables !!!\n\n")
+    sys.stderr.flush()
 
+    sys.stderr.write(f"\n\n!!! llm_worker: Loading model {script_args.model} !!!\n\n")
+    sys.stderr.flush()
     llm = LLM(
         model=script_args.model,
         revision=script_args.revision,
@@ -292,15 +356,27 @@ def llm_worker(
         max_model_len=script_args.max_model_len,
         worker_extension_cls="trl.scripts.vllm_serve.WeightSyncWorkerExtension",
     )
+    sys.stderr.write(f"\n\n!!! llm_worker: Model loaded successfully !!!\n\n")
+    sys.stderr.flush()
 
     # Send ready signal to parent process
+    sys.stderr.write(f"\n\n!!! llm_worker: Sending ready signal to parent !!!\n\n")
+    sys.stderr.flush()
     connection.send({"status": "ready"})
+    sys.stderr.write(f"\n\n!!! llm_worker: Ready signal sent !!!\n\n")
+    sys.stderr.flush()
 
     while True:
         # Wait for commands from the parent process
+        sys.stderr.write(f"\n\n!!! llm_worker: Waiting for commands from parent !!!\n\n")
+        sys.stderr.flush()
         try:
             command = connection.recv()
+            sys.stderr.write(f"\n\n!!! llm_worker: Received command: {command['type']} - {command.get('method', '')} !!!\n\n")
+            sys.stderr.flush()
         except KeyboardInterrupt:
+            sys.stderr.write(f"\n\n!!! llm_worker: Received KeyboardInterrupt, closing communicator !!!\n\n")
+            sys.stderr.flush()
             llm.collective_rpc(method="close_communicator")
             break
 
@@ -309,11 +385,24 @@ def llm_worker(
             method_name = command["method"]
             args, kwargs = command.get("args", ()), command.get("kwargs", {})
             method = getattr(llm, method_name)
+            sys.stderr.write(f"\n\n!!! llm_worker: Executing method {method_name} !!!\n\n")
+            sys.stderr.flush()
             result = method(*args, **kwargs)
+            sys.stderr.write(f"\n\n!!! llm_worker: Method {method_name} completed !!!\n\n")
+            sys.stderr.flush()
             if command["type"] == "call":
+                sys.stderr.write(f"\n\n!!! llm_worker: Sending result back to parent !!!\n\n")
+                sys.stderr.flush()
                 connection.send(result)
+                sys.stderr.write(f"\n\n!!! llm_worker: Result sent !!!\n\n")
+                sys.stderr.flush()
         elif command["type"] == "shutdown":
+            sys.stderr.write(f"\n\n!!! llm_worker: Received shutdown command !!!\n\n")
+            sys.stderr.flush()
             break
+            
+    sys.stderr.write(f"\n\n!!! llm_worker END !!!\n\n")
+    sys.stderr.flush()
 
 
 def chunk_list(lst: list, n: int) -> list[list]:
@@ -504,15 +593,29 @@ def main(script_args: ScriptArguments):
                 - `port` (`int`): Port number to be used for communication.
                 - `world_size` (`int`): Total number of participating processes in the group.
         """
+        import sys
+        sys.stderr.write(f"\n\n!!! Endpoint /init_communicator/ START: host={request.host}, port={request.port}, world_size={request.world_size} !!!\n\n")
+        sys.stderr.flush()
+        
         world_size = script_args.tensor_parallel_size * script_args.data_parallel_size + 1
+        sys.stderr.write(f"\n\n!!! Endpoint /init_communicator/: Calculated world_size={world_size} !!!\n\n")
+        sys.stderr.flush()
 
         # The function init_communicator is called this way: init_communicator(host, port, world_size)
         # So with collective_rpc we need to call it this way:
         # llm.collective_rpc(method="init_communicator", args=(host, port, world_size))
         kwargs = {"method": "init_communicator", "args": (request.host, request.port, world_size)}
-        for connection in connections:
+        sys.stderr.write(f"\n\n!!! Endpoint /init_communicator/: Sending rpc to {len(connections)} workers !!!\n\n")
+        sys.stderr.flush()
+        for i, connection in enumerate(connections):
+            sys.stderr.write(f"\n\n!!! Endpoint /init_communicator/: Sending to worker {i} !!!\n\n")
+            sys.stderr.flush()
             connection.send({"type": "fire_and_forget", "method": "collective_rpc", "kwargs": kwargs})
+            sys.stderr.write(f"\n\n!!! Endpoint /init_communicator/: Sent to worker {i} !!!\n\n")
+            sys.stderr.flush()
 
+        sys.stderr.write("\n\n!!! Endpoint /init_communicator/ COMPLETE !!!\n\n")
+        sys.stderr.flush()
         return {"message": "Request received, initializing communicator"}
 
     class UpdateWeightsRequest(BaseModel):
@@ -534,14 +637,26 @@ def main(script_args: ScriptArguments):
                 - `shape` (list of `int`): Shape of the weight
 
         """
+        import sys
+        sys.stderr.write(f"\n\n!!! Endpoint /update_named_param/ START: name={request.name}, dtype={request.dtype}, shape={request.shape} !!!\n\n")
+        sys.stderr.flush()
+        
         # The function update_named_param is called this way: update_named_param("name", torch.float32, (10, 10))
         # So with collective_rpc we need to call it this way:
         # llm.collective_rpc("update_named_param", args=("name", torch.float32, (10, 10)))
         dtype = torch.__getattribute__(request.dtype.split(".")[-1])
         kwargs = {"method": "update_named_param", "args": (request.name, dtype, tuple(request.shape))}
-        for connection in connections:
+        sys.stderr.write(f"\n\n!!! Endpoint /update_named_param/: Sending rpc to {len(connections)} workers !!!\n\n")
+        sys.stderr.flush()
+        for i, connection in enumerate(connections):
+            sys.stderr.write(f"\n\n!!! Endpoint /update_named_param/: Sending to worker {i} !!!\n\n")
+            sys.stderr.flush()
             connection.send({"type": "fire_and_forget", "method": "collective_rpc", "kwargs": kwargs})
+            sys.stderr.write(f"\n\n!!! Endpoint /update_named_param/: Sent to worker {i} !!!\n\n")
+            sys.stderr.flush()
 
+        sys.stderr.write("\n\n!!! Endpoint /update_named_param/ COMPLETE !!!\n\n")
+        sys.stderr.flush()
         return {"message": "Request received, updating named parameter"}
 
     @app.post("/reset_prefix_cache/")
@@ -549,11 +664,55 @@ def main(script_args: ScriptArguments):
         """
         Resets the prefix cache for the model.
         """
-        for connection in connections:
+        import sys
+        import time
+        start_time = time.time()
+        sys.stderr.write(f"\n\n!!! Endpoint /reset_prefix_cache/ START at {start_time:.6f} !!!\n\n")
+        sys.stderr.flush()
+        
+        sys.stderr.write(f"\n\n!!! Endpoint /reset_prefix_cache/: Sending to {len(connections)} workers !!!\n\n")
+        sys.stderr.flush()
+        
+        # First send to all workers
+        send_times = []
+        for i, connection in enumerate(connections):
+            send_start = time.time()
+            sys.stderr.write(f"\n\n!!! Endpoint /reset_prefix_cache/: Sending to worker {i} at {send_start:.6f} !!!\n\n")
+            sys.stderr.flush()
             connection.send({"type": "call", "method": "reset_prefix_cache"})
-        # Wait for and collect all results
-        all_outputs = [connection.recv() for connection in connections]
+            send_end = time.time()
+            send_times.append(send_end - send_start)
+            sys.stderr.write(f"\n\n!!! Endpoint /reset_prefix_cache/: Sent to worker {i} at {send_end:.6f} (took {send_times[-1]:.6f}s) !!!\n\n")
+            sys.stderr.flush()
+            
+        # Then wait for all results
+        sys.stderr.write("\n\n!!! Endpoint /reset_prefix_cache/: Waiting for all results !!!\n\n")
+        sys.stderr.flush()
+        all_outputs = []
+        recv_times = []
+        for i, connection in enumerate(connections):
+            recv_start = time.time()
+            sys.stderr.write(f"\n\n!!! Endpoint /reset_prefix_cache/: Waiting for worker {i} at {recv_start:.6f} !!!\n\n")
+            sys.stderr.flush()
+            output = connection.recv()
+            recv_end = time.time()
+            recv_times.append(recv_end - recv_start)
+            all_outputs.append(output)
+            sys.stderr.write(f"\n\n!!! Endpoint /reset_prefix_cache/: Received from worker {i} at {recv_end:.6f} (took {recv_times[-1]:.6f}s): {output} !!!\n\n")
+            sys.stderr.flush()
+            
         success = all(output for output in all_outputs)
+        end_time = time.time()
+        total_time = end_time - start_time
+        sys.stderr.write(f"\n\n!!! Endpoint /reset_prefix_cache/: Overall success={success} !!!\n\n")
+        sys.stderr.write(f"\n\n!!! Endpoint /reset_prefix_cache/: TIMING SUMMARY !!!\n")
+        sys.stderr.write(f"!!! Total time: {total_time:.6f}s !!!\n")
+        sys.stderr.write(f"!!! Send times: {send_times} !!!\n")
+        sys.stderr.write(f"!!! Receive times: {recv_times} !!!\n\n")
+        sys.stderr.flush()
+        
+        sys.stderr.write(f"\n\n!!! Endpoint /reset_prefix_cache/ COMPLETE at {end_time:.6f} (took {total_time:.6f}s) !!!\n\n")
+        sys.stderr.flush()
         return {"message": "Request received, resetting prefix cache status: " + str(success)}
 
     @app.post("/close_communicator/")
@@ -561,9 +720,22 @@ def main(script_args: ScriptArguments):
         """
         Closes the weight update group and cleans up associated resources.
         """
+        import sys
+        sys.stderr.write("\n\n!!! Endpoint /close_communicator/ START !!!\n\n")
+        sys.stderr.flush()
+        
         kwargs = {"method": "close_communicator"}
-        for connection in connections:
+        sys.stderr.write(f"\n\n!!! Endpoint /close_communicator/: Sending to {len(connections)} workers !!!\n\n")
+        sys.stderr.flush()
+        for i, connection in enumerate(connections):
+            sys.stderr.write(f"\n\n!!! Endpoint /close_communicator/: Sending to worker {i} !!!\n\n")
+            sys.stderr.flush()
             connection.send({"type": "fire_and_forget", "method": "collective_rpc", "kwargs": kwargs})
+            sys.stderr.write(f"\n\n!!! Endpoint /close_communicator/: Sent to worker {i} !!!\n\n")
+            sys.stderr.flush()
+            
+        sys.stderr.write("\n\n!!! Endpoint /close_communicator/ COMPLETE !!!\n\n")
+        sys.stderr.flush()
         return {"message": "Request received, closing communicator"}
 
     # Start the server
