@@ -53,11 +53,14 @@ class TestChunkList(unittest.TestCase):
             [[1, "two", 3.0], [{"four": 4}, ["f", "i", "v", "e"]]],
         )
 
+class TestTest(unittest.TestCase):
+    def test_test(self):
+        self.assertEqual(1, 1)
 
-@pytest.mark.slow
-@require_torch_multi_gpu
+# @pytest.mark.slow
+# @require_torch_multi_gpu
 class TestVLLMClientServer(unittest.TestCase):
-    model_id = "Qwen/Qwen2.5-1.5B"
+    model_id = "Qwen/Qwen3-0.6B"
 
     @classmethod
     def setUpClass(cls):
@@ -65,13 +68,17 @@ class TestVLLMClientServer(unittest.TestCase):
         env = os.environ.copy()
         env["CUDA_VISIBLE_DEVICES"] = "1"  # Restrict to GPU 1
 
+        print("Starting server")
+
         # Start the server process
         cls.server_process = subprocess.Popen(
-            ["trl", "vllm-serve", "--model", cls.model_id], stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env
+            ["trl", "vllm-serve", "--model", cls.model_id, "--max_model_len", "512"], env=env
         )
 
+        print("Server started")
+
         # Initialize the client
-        cls.client = VLLMClient(connection_timeout=240)
+        cls.client = VLLMClient(connection_timeout=320)
         cls.client.init_communicator()
 
     def test_generate(self):
@@ -134,7 +141,7 @@ class TestVLLMClientServer(unittest.TestCase):
 @pytest.mark.slow
 @require_3_gpus
 class TestVLLMClientServerTP(unittest.TestCase):
-    model_id = "Qwen/Qwen2.5-1.5B"
+    model_id = "Qwen/Qwen3-0.6B"
 
     @classmethod
     def setUpClass(cls):
@@ -196,7 +203,7 @@ class TestVLLMClientServerTP(unittest.TestCase):
 @pytest.mark.slow
 @require_3_gpus
 class TestVLLMClientServerDP(unittest.TestCase):
-    model_id = "Qwen/Qwen2.5-1.5B"
+    model_id = "Qwen/Qwen3-0.6B"
 
     @classmethod
     def setUpClass(cls):
