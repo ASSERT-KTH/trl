@@ -129,7 +129,7 @@ def add_vllm_client_endpoints(app: FastAPI, llm: AsyncLLM):
         world_size: int
 
     @app.post("/init_communicator/")
-    async def init_communicator(request: InitCommunicatorRequest, background_tasks: BackgroundTasks):
+    async def init_communicator(request: InitCommunicatorRequest):
         """
         Initializes the communicator for synchronizing model weights between a client and multiple server
         workers.
@@ -144,9 +144,8 @@ def add_vllm_client_endpoints(app: FastAPI, llm: AsyncLLM):
         sys.stderr.write(f"\n\n!!! ASYNC init_communicator START: host={request.host}, port={request.port}, world_size={request.world_size} !!!\n\n")
         sys.stderr.flush()
         
-        background_tasks.add_task(
-            llm.engine_core.collective_rpc_async,
-            "init_communicator",
+
+        await llm.engine_core.collective_rpc_async("init_communicator",
             args=(request.host, request.port, llm.vllm_config.parallel_config.tensor_parallel_size + 1),
         )
         
@@ -160,7 +159,7 @@ def add_vllm_client_endpoints(app: FastAPI, llm: AsyncLLM):
         shape: list[int]
 
     @app.post("/update_named_param/")
-    async def update_named_param(request: UpdateWeightsRequest, background_tasks: BackgroundTasks):
+    async def update_named_param(request: UpdateWeightsRequest):
         """
         Updates the model weights with the provided tensor.
 
@@ -183,21 +182,21 @@ def add_vllm_client_endpoints(app: FastAPI, llm: AsyncLLM):
         # And with background_tasks.add_task we need to call it this way:
         # background_tasks.add_task(llm.collective_rpc, "update_named_param", args=("name", torch.float32, (10, 10)))
         dtype = torch.__getattribute__(request.dtype.split(".")[-1])
-        background_tasks.add_task(llm.engine_core.collective_rpc_async, "update_named_param", args=(request.name, dtype, request.shape))
+        await llm.engine_core.collective_rpc_async("update_named_param", args=(request.name, dtype, request.shape))
         
         sys.stderr.write("\n\n!!! ASYNC update_named_param BACKGROUND TASK ADDED !!!\n\n")
         sys.stderr.flush()
         return {"message": "Request received, updating named parameter"}
 
     @app.post("/reset_prefix_cache/")
-    async def reset_prefix_cache(background_tasks: BackgroundTasks):
+    async def reset_prefix_cache():
         """
         Resets the prefix cache for the model.
         """
         import sys
         sys.stderr.write("\n\n!!! ASYNC RESET_PREFIX_CACHE STARTED !!!\n\n")
         sys.stderr.flush()
-        background_tasks.add_task(llm.engine_core.reset_prefix_cache_async)
+        await llm.engine_core.reset_prefix_cache_async()
         sys.stderr.write("\n\n!!! ASYNC RESET_PREFIX_CACHE BACKGROUND TASK ADDED !!!\n\n")
         sys.stderr.flush()
         return {"message": "Request received, resetting prefix cache"}
@@ -323,7 +322,7 @@ async def run_server(args, **uvicorn_kwargs):
         
 
 def main():
-    print("WORKING"*1000)
+    print("FUCKBACKGROUND"*1000)
     cli_env_setup()
     
     parser = FlexibleArgumentParser(description="vLLM OpenAI-Compatible RESTful API server with weight syncing.")
