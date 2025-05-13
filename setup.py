@@ -90,6 +90,7 @@ EXTRAS = {
     "test": ["parameterized", "pytest-cov", "pytest-rerunfailures", "pytest-xdist", "pytest"],
     "vllm": ["vllm>=0.8.5", "fastapi", "pydantic", "requests", "uvicorn"],
     "vlm": ["Pillow"],
+    "sglang": ["sglang"],
 }
 EXTRAS["dev"] = []
 for reqs in EXTRAS.values():

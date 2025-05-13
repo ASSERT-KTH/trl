@@ -38,8 +38,8 @@ _unsloth_available = _is_package_available("unsloth")
 _uvicorn_available = _is_package_available("uvicorn")
 _uvloop_available = _is_package_available("uvloop")
 _vllm_available = _is_package_available("vllm")
+_sglang_available = _is_package_available("sglang")
 _joblib_available = _is_package_available("joblib")
-
 
 def is_deepspeed_available() -> bool:
     return _deepspeed_available
@@ -92,6 +92,8 @@ def is_uvloop_available() -> bool:
 def is_vllm_available() -> bool:
     return _vllm_available
 
+def is_sglang_available() -> bool:
+    return _sglang_available
 
 def is_joblib_available() -> bool:
     return _joblib_available
