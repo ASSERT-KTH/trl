@@ -80,41 +80,22 @@ class WeightSyncWorkerExtension:
             world_size (`int`):
                 Total number of participating processes in the update group.
         """
-        import sys
-        sys.stderr.write(f"\n\n!!! WORKER init_communicator START: host={host}, port={port}, world_size={world_size} !!!\n\n")
-        sys.stderr.flush()
-        
+
         if self.pynccl_comm is not None:
-            sys.stderr.write("\n\n!!! WORKER Error - Weight update group already initialized !!!\n\n")
-            sys.stderr.flush()
             raise RuntimeError("Weight update group already initialized. Call close_communicator first.")
 
         # Get the rank of the current worker in the global world group.
         rank = get_world_group().rank
-        sys.stderr.write(f"\n\n!!! WORKER Current rank: {rank} !!!\n\n")
-        sys.stderr.flush()
 
         # Create a stateless process group to manage communication between training processes and vLLM workers.
-        sys.stderr.write("\n\n!!! WORKER Creating StatelessProcessGroup... !!!\n\n")
-        sys.stderr.flush()
         pg = StatelessProcessGroup.create(host=host, port=port, rank=rank, world_size=world_size)
-        sys.stderr.write("\n\n!!! WORKER StatelessProcessGroup created !!!\n\n")
-        sys.stderr.flush()
 
         # Initialize the NCCL-based communicator for weight synchronization.
-        sys.stderr.write("\n\n!!! WORKER Initializing PyNcclCommunicator... !!!\n\n")
-        sys.stderr.flush()
         self.pynccl_comm = PyNcclCommunicator(pg, device=self.device)
-        sys.stderr.write("\n\n!!! WORKER PyNcclCommunicator initialized !!!\n\n")
-        sys.stderr.flush()
 
         # The client process that sends updated weights has the highest rank (world_size - 1).
         self.client_rank = world_size - 1
-        sys.stderr.write(f"\n\n!!! WORKER Client rank set to {self.client_rank} !!!\n\n")
-        sys.stderr.flush()
-        
-        sys.stderr.write("\n\n!!! WORKER init_communicator COMPLETE !!!\n\n")
-        sys.stderr.flush()
+
 
     def update_named_param(self, name: str, dtype: torch.dtype, shape: Sequence[int]) -> None:
         """
@@ -128,40 +109,18 @@ class WeightSyncWorkerExtension:
             shape (`Sequence[int]`):
                 Shape of the weight tensor.
         """
-        import sys
-        sys.stderr.write(f"\n\n!!! WORKER update_named_param START: name={name}, dtype={dtype}, shape={shape} !!!\n\n")
-        sys.stderr.flush()
-        
         if self.pynccl_comm is None:
-            sys.stderr.write("\n\n!!! WORKER Error - Communicator not initialized !!!\n\n")
-            sys.stderr.flush()
             raise RuntimeError("Communicator not initialized. Call `init_communicator` first.")
 
         # Allocate memory for the incoming weight tensor on the correct device.
-        sys.stderr.write(f"\n\n!!! WORKER Allocating tensor !!!\n\n")
-        sys.stderr.flush()
         weight = torch.empty(shape, dtype=dtype, device=self.device)
         
         # Use NCCL to broadcast the updated weights from the client (src) to all workers.
-        sys.stderr.write(f"\n\n!!! WORKER Broadcasting weights from client_rank={self.client_rank} !!!\n\n")
-        sys.stderr.flush()
         self.pynccl_comm.broadcast(weight, src=self.client_rank, stream=torch.cuda.current_stream())
-        sys.stderr.write("\n\n!!! WORKER Broadcast complete !!!\n\n")
-        sys.stderr.flush()
         
         self.pynccl_comm.group.barrier()
-        sys.stderr.write("\n\n!!! WORKER Barrier complete !!!\n\n")
-        sys.stderr.flush()
-
         # Load the received weights into the model.
-        sys.stderr.write("\n\n!!! WORKER Loading weights into model !!!\n\n")
-        sys.stderr.flush()
         self.model_runner.model.load_weights(weights=[(name, weight)])
-        sys.stderr.write("\n\n!!! WORKER Weights loaded successfully !!!\n\n")
-        sys.stderr.flush()
-        
-        sys.stderr.write("\n\n!!! WORKER update_named_param COMPLETE !!!\n\n")
-        sys.stderr.flush()
 
     def close_communicator(self) -> None:
         """
@@ -169,25 +128,10 @@ class WeightSyncWorkerExtension:
 
         This method deletes the NCCL communicator to release associated resources.
         """
-        import sys
-        sys.stderr.write("\n\n!!! WORKER close_communicator START !!!\n\n")
-        sys.stderr.flush()
-
         if self.pynccl_comm is not None:
-            sys.stderr.write("\n\n!!! WORKER Deleting PyNcclCommunicator !!!\n\n")
-            sys.stderr.flush()
             del self.pynccl_comm
             self.pynccl_comm = None  # Ensure attribute is reset to None
             self.client_rank = None  # Ensure attribute is reset to None
-            sys.stderr.write("\n\n!!! WORKER Communicator deleted !!!\n\n")
-            sys.stderr.flush()
-        else:
-            sys.stderr.write("\n\n!!! WORKER No communicator to close !!!\n\n")
-            sys.stderr.flush()
-        
-        sys.stderr.write("\n\n!!! WORKER close_communicator COMPLETE !!!\n\n")
-        sys.stderr.flush()
-
 
 @dataclass
 class ScriptArguments:
@@ -448,12 +392,7 @@ def main(script_args: ScriptArguments):
         """
         Resets the prefix cache for the model.
         """
-        import sys
-        sys.stderr.write("\n\n!!! RESET_PREFIX_CACHE STARTED !!!\n\n")
-        sys.stderr.flush()
         success = llm.llm_engine.reset_prefix_cache()
-        sys.stderr.write(f"\n\n!!! RESET_PREFIX_CACHE COMPLETED: {success} !!!\n\n")
-        sys.stderr.flush()
         return {"message": "Request received, resetting prefix cache status: " + str(success)}
 
     @app.post("/close_communicator/")

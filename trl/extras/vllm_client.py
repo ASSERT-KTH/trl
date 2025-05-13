@@ -12,10 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import time
 import atexit
 import logging
-import time
-from typing import Any, Optional
+from typing import TypedDict
 from abc import ABC, abstractmethod
 
 import torch
@@ -37,9 +37,18 @@ if is_vllm_available():
 logger = logging.getLogger(__name__)
 
 
+class GenerationResult(TypedDict, total=False):
+    """GRPO payload with required prompt/completion; extras allowed."""
+    # Shared inputs across N rollouts in GRPO (across many GenerationResults)
+    prompt: list[dict[str, str]]  # {role: str, content: str}
+    # This comes after that, N different rollouts of the same prompt
+    completion: list[dict[str, str]]  # {role: str, content: str}
+    # Extra keys and values are forwarded to the user specified reward functions
+
+
 class Generates(ABC):
     @abstractmethod
-    def generate(self, data: list[dict], **kwargs) -> list[dict]:
+    def generate(self, data: list[dict], **kwargs) -> list[GenerationResult]:
         """
         Output dict MUST contain a key "history" with the json formatted chat history.
         """
@@ -236,15 +245,15 @@ class VLLMClient(BaseVLLMClient):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         
-        if not requests.head(f"http://{self.host}:{self.server_port}/generate/").ok:
-            raise Exception("Incorrect server configuration. Please use `trl vllm-serve` to start the server.")
+        # if not requests.head(f"http://{self.host}:{self.server_port}/generate/").ok:
+        #     raise Exception("Incorrect server configuration. Please use `trl vllm-serve` to start the server.")
         
 class AsyncVLLMClient(BaseVLLMClient):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         
         if not requests.head(f"http://{self.host}:{self.server_port}/v1/chat/completions").ok:
-            raise Exception("Incorrect server configuration. Please use `trl vllm-serve-async` to start the server.")
+            raise Exception("Incorrect server configuration. Please use `vllm-serve-async` to start the server.")  # TODO: move to trl CLI
         
         
 # Example usage

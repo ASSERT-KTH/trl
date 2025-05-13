@@ -105,18 +105,26 @@ def run_all_tests():
         print("Failed to initialize communicator!")
         return False
     
+    time.sleep(30)
+    
     # Test parameter updates
     if not test_update_named_param():
         print("Failed to update named parameter!")
         return False
+    
+    time.sleep(30)
     
     # Test prefix cache reset
     if not test_reset_prefix_cache():
         print("Failed to reset prefix cache!")
         return False
     
+    time.sleep(30)
+    
     # Test generation endpoint
     test_chat_completions()
+
+    time.sleep(30)
     
     # Test closing communicator
     if not test_close_communicator():

@@ -774,9 +774,8 @@ class GRPOTrainer(Trainer):
                 max_tokens=self.max_completion_length,
                 guided_decoding_regex=self.guided_decoding_regex,
             )
-            histories = [o["history"] for o in outputs]
-            prompts = [h[0] for h in histories]  # only mask away the system prompt
-            completions = [h[1:] for h in histories]
+            prompts = [o["prompt"] for o in outputs]
+            completions = [o["completion"] for o in outputs]
 
 
             prompts_text = [self.processing_class.apply_chat_template(example, tokenize=False) for example in inputs]
