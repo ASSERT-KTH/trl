@@ -115,7 +115,7 @@ setup(
     ],
     url="https://github.com/huggingface/trl",
     entry_points={
-        "console_scripts": ["trl=trl.cli:main", "vllm-serve-async=trl.scripts.vllm_serve_async:main"],
+        "console_scripts": ["trl=trl.cli:main", "sglang-serve=trl.scripts.sglang_serve:main"],
     },
     include_package_data=True,
     package_data={

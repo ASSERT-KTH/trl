@@ -46,7 +46,36 @@ class GenerationResult(TypedDict, total=False):
     # Extra keys and values are forwarded to the user specified reward functions
 
 
-class Generates(ABC):
+class Client(ABC):
+    @abstractmethod
+    def check_server(self, total_timeout: float = 0.0, retry_interval: float = 2.0):
+        """
+        Check server availability with retries on failure, within a total timeout duration. If the server is not up
+        after the total timeout duration, raise a `ConnectionError`.
+        """
+        pass
+
+    @abstractmethod 
+    def init_communicator(self):
+        """
+        Initialize the weight update group in a distributed setup for model synchronization.
+        """
+        pass
+
+    @abstractmethod
+    def close_communicator(self):
+        """
+        Closes the weight update group and cleans up the communication group.
+        """
+        pass
+
+    @abstractmethod
+    def update_named_param(self, name: str, weights: torch.Tensor):
+        """
+        Updates a specific named parameter in the model and broadcasts it to other processes.
+        """
+        pass
+
     @abstractmethod
     def generate(self, data: list[dict], **kwargs) -> list[GenerationResult]:
         """
@@ -55,7 +84,7 @@ class Generates(ABC):
         pass
 
 
-class BaseVLLMClient(Generates):
+class VLLMClient(Client):
     """
     An abstract base class for clients to interact with a vLLM server.
 
@@ -64,18 +93,6 @@ class BaseVLLMClient(Generates):
     
     This class provides methods to generate completions, initialize and manage weight update groups, and update model
     weights in a distributed setting. Before using it, start the vLLM server with `trl vllm-serve`.
-    
-    (This pattern could be extended to also wrap a local, Transformers, model, but that feels overengineered.)
-
-    Implementations:
-    - SyncVLLMClient: For synchronous, batched, generation using a vLLM server
-        - Faster, but more limited in which types of rollouts we can generate
-        - This is exactly the same as the previous `VLLMClient`
-    - AsyncVLLMClient: For asynchronous, generation using a vLLM server
-        - Slower, but more flexible
-        - Behaves like a normal, OpenAI-compatible, API server
-        - By extending this class, it allows plug-and-play of any service that interacts with an OpenAI-compatible API
-        - To models "in-situ"
 
     Args:
         host (`str`, *optional*, defaults to `"0.0.0.0"`):
@@ -238,22 +255,6 @@ class BaseVLLMClient(Generates):
         response = self.session.post(url)
         if response.status_code != 200:
             raise Exception(f"Request failed: {response.status_code}, {response.text}")
-
-# For now, always implement these downstream
-
-class VLLMClient(BaseVLLMClient):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        
-        # if not requests.head(f"http://{self.host}:{self.server_port}/generate/").ok:
-        #     raise Exception("Incorrect server configuration. Please use `trl vllm-serve` to start the server.")
-        
-class AsyncVLLMClient(BaseVLLMClient):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        
-        if not requests.head(f"http://{self.host}:{self.server_port}/v1/chat/completions").ok:
-            raise Exception("Incorrect server configuration. Please use `vllm-serve-async` to start the server.")  # TODO: move to trl CLI
         
         
 # Example usage

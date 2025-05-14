@@ -44,7 +44,7 @@ from transformers.utils import is_peft_available
 
 from ..data_utils import apply_chat_template, is_conversational, maybe_apply_chat_template
 from ..extras.profiling import profiling_context, profiling_decorator
-from ..extras.vllm_client import BaseVLLMClient, VLLMClient, AsyncVLLMClient
+from ..extras.vllm_client import Client, VLLMClient
 from ..import_utils import is_deepspeed_available, is_liger_kernel_available, is_rich_available, is_vllm_available
 from ..models import create_reference_model, prepare_deepspeed, unwrap_model_for_generation
 from .callbacks import SyncRefModelCallback
@@ -239,10 +239,11 @@ class GRPOTrainer(Trainer):
                   [Using a custom reward function](#using-a-custom-reward-function).
             - A list of reward functions, where each item can independently be any of the above types. Mixing different
             types within the list (e.g., a string model ID and a custom reward function) is allowed.
+        client_cls ([`Client`]):
+            Client to use for generating completions.
         args ([`GRPOConfig`], *optional*, defaults to `None`):
             Configuration for this trainer. If `None`, a default configuration is used.
-        client_cls ([`BaseVLLMClient`], *optional*, defaults to `VLLMClient`):
-            vLLM client to use for generating completions if args.use_vllm is True. If `None`, the default batched vLLM client is used.
+            Client to use for generating completions if args.use_vllm is True. If `None`, the default batched vLLM client is used.
         train_dataset ([`~datasets.Dataset`] or [`~datasets.IterableDataset`]):
             Dataset to use for training. It must include a column `"prompt"`. Any additional columns in the dataset is
             ignored. The format of the samples can be either:
@@ -283,8 +284,8 @@ class GRPOTrainer(Trainer):
         self,
         model: Union[str, PreTrainedModel],
         reward_funcs: Union[RewardFunc, list[RewardFunc]],
+        client_cls: Optional[Type[Client]],
         args: Optional[GRPOConfig] = None,
-        client_cls: Optional[Type[BaseVLLMClient]] = None,
         train_dataset: Optional[Union[Dataset, IterableDataset]] = None,
         eval_dataset: Optional[Union[Dataset, IterableDataset, dict[str, Union[Dataset, IterableDataset]]]] = None,
         processing_class: Optional[PreTrainedTokenizerBase] = None,
@@ -541,8 +542,7 @@ class GRPOTrainer(Trainer):
                 )
 
             if self.accelerator.is_main_process:
-                client_cls = client_cls or VLLMClient
-                self.vllm_client = client_cls(
+                self.client = client_cls(
                     args.vllm_server_host, args.vllm_server_port, connection_timeout=args.vllm_server_timeout
                 )
 
@@ -720,7 +720,7 @@ class GRPOTrainer(Trainer):
                     name = name.replace("modules_to_save.default.", "")
 
                     if self.accelerator.is_main_process:
-                        self.vllm_client.update_named_param(name, param.data)
+                        self.client.update_named_param(name, param.data)
 
                 # Unmerge adapters while parameters are still gathered
                 self.model.unmerge_adapter()
@@ -730,11 +730,11 @@ class GRPOTrainer(Trainer):
             for name, param in self.model.named_parameters():
                 with gather_if_zero3([param]):
                     if self.accelerator.is_main_process:
-                        self.vllm_client.update_named_param(name, param.data)
+                        self.client.update_named_param(name, param.data)
 
         # Reset cache on main process
         if self.accelerator.is_main_process:
-            self.vllm_client.reset_prefix_cache()
+            self.client.reset_prefix_cache()
 
     @profiling_decorator
     def _prepare_inputs(self, inputs: dict[str, Union[torch.Tensor, Any]]) -> dict[str, Union[torch.Tensor, Any]]:
@@ -764,7 +764,7 @@ class GRPOTrainer(Trainer):
         # Generate completions using vLLM: gather all prompts and use them in a single call in the main process
         all_inputs = gather_object(inputs)
         if self.accelerator.is_main_process:
-            outputs = self.vllm_client.generate(
+            outputs = self.client.generate(
                 data=all_inputs,
                 repetition_penalty=self.repetition_penalty,
                 temperature=self.temperature,
