@@ -1188,6 +1188,8 @@ class GRPOTrainer(Trainer):
             prompt_ids = prompt_completion_ids[:, :prompt_length]
             completion_ids = prompt_completion_ids[:, prompt_length:]
 
+        is_eos = completion_ids == self.processing_class.eos_token_id
+
         if self.multi_turn and self.vllm_mode == "async_server": # TODO: Fix
             # Create an integer mask based on completion lengths to mask right padding tokens
             max_completion_len = completion_ids.size(1)
@@ -1196,7 +1198,6 @@ class GRPOTrainer(Trainer):
             completion_mask = (indices < completion_lens_tensor).int()  # all except last eos which is supposed to be there
         else:
             # Mask everything after the first EOS token
-            is_eos = completion_ids == self.processing_class.eos_token_id
             eos_idx = torch.full((is_eos.size(0),), is_eos.size(1), dtype=torch.long, device=device)
             eos_idx[is_eos.any(dim=1)] = is_eos.int().argmax(dim=1)[is_eos.any(dim=1)]
             sequence_indices = torch.arange(is_eos.size(1), device=device).expand(is_eos.size(0), -1)
