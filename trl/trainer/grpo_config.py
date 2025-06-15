@@ -328,6 +328,13 @@ class GRPOConfig(TrainingArguments):
         default=False,
         metadata={"help": "(WIP) Whether client does multi-turn generation."},
     )
+    mask_tool_responses: bool = field(
+        default=False,
+        metadata={
+            "help": "Whether to mask tool response tokens from the loss calculation when using async_server mode. "
+            "When enabled, tokens within <tool_response> tags are excluded from loss computation."
+        },
+    )
 
     # Parameters that control generation acceleration powered by vLLM
     use_vllm: bool = field(

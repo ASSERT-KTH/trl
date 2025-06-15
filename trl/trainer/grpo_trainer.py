@@ -58,6 +58,7 @@ from .utils import (
     disable_dropout_in_model,
     generate_model_card,
     get_comet_experiment_url,
+    mask_tool_response_tokens,
     pad,
     print_prompt_completions_sample,
     selective_log_softmax,
@@ -518,6 +519,7 @@ class GRPOTrainer(Trainer):
         self.loss_type = args.loss_type
         self.scale_rewards = args.scale_rewards
         self.mask_truncated_completions = args.mask_truncated_completions
+        self.mask_tool_responses = args.mask_tool_responses
 
         # Datasets
         self.shuffle_dataset = args.shuffle_dataset
@@ -822,6 +824,7 @@ class GRPOTrainer(Trainer):
             mini_repeat_count=self.num_generations,
             seed=self.args.seed,
         )
+
 
     def _enable_gradient_checkpointing(self, model: PreTrainedModel, args: GRPOConfig) -> PreTrainedModel:
         """Enables gradient checkpointing for the model."""
@@ -1168,7 +1171,8 @@ class GRPOTrainer(Trainer):
             # Pad the completions, and concatenate them with the prompts
             completion_ids = [torch.tensor(ids, device=device) for ids in completion_ids]
             completion_ids = pad(completion_ids, padding_value=self.processing_class.pad_token_id)
-            prompt_completion_ids = torch.cat([prompt_ids, completion_ids], dim=1)
+            max_length = self.args.max_prompt_length + self.args.max_completion_length
+            prompt_completion_ids = torch.cat([prompt_ids, completion_ids], dim=1)[:, :max_length]
         else:
             # Regular generation path
             with unwrap_model_for_generation(
@@ -1213,6 +1217,10 @@ class GRPOTrainer(Trainer):
         if self.mask_truncated_completions:
             truncated_completions = ~is_eos.any(dim=1)
             completion_mask = completion_mask * (~truncated_completions).unsqueeze(1).int()
+
+        # Mask tool response tokens if enabled and in async_server mode
+        if self.mask_tool_responses and self.vllm_mode == "async_server":
+            completion_mask = mask_tool_response_tokens(completion_ids, completion_mask, self.processing_class)
 
         # Concatenate prompt_mask with completion_mask for logit computation
         attention_mask = torch.cat([prompt_mask, completion_mask], dim=1)  # (B, P+C)

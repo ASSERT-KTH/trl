@@ -1793,3 +1793,147 @@ def print_prompt_completions_sample(
 
     panel = Panel(table, expand=False, title=f"Step {step}", border_style="bold white")
     console.print(panel)
+
+
+def mask_tool_response_tokens(
+    completion_ids: torch.Tensor, 
+    completion_mask: torch.Tensor, 
+    processing_class: PreTrainedTokenizerBase
+) -> torch.Tensor:
+    """
+    Masks tokens from tool responses using comprehensive pattern detection.
+    
+    Supports multiple patterns across different tokenizer families:
+    - Qwen3: <tool_response> ... </tool_response> (single tokens)
+    - Qwen2: <|im_start|>tool ... <|im_end|> (multi-token sequence)
+    - Llama-3: <|start_header_id|>ipython ... <|eot_id|> (multi-token sequence)
+    - Mistral: <tool> ... </tool> (multi-token sequence)
+    
+    Args:
+        completion_ids (`torch.Tensor`): 
+            Tensor of token IDs for completions (B, L)
+        completion_mask (`torch.Tensor`): 
+            Current completion mask (B, L)
+        processing_class (`PreTrainedTokenizerBase`): 
+            The tokenizer used for encoding/decoding
+            
+    Returns:
+        `torch.Tensor`: Updated completion mask with tool response tokens masked out
+    """
+    device = completion_ids.device
+    batch_size = completion_ids.shape[0]
+    
+    # Define all possible tool response patterns (start, end)
+    patterns_to_check = [
+        ("<tool_response>", "</tool_response>"),          # Qwen3 style
+        ("<|start_header_id|>ipython", "<|eot_id|>"),     # Llama-3 style
+        ("<tool>", "</tool>"),                            # Mistral style
+    ]
+    
+    # Also check for Qwen2-style sequence patterns
+    qwen2_patterns = [
+        ("<|im_start|>tool", "<|im_end|>"),               # Qwen2 tool role
+    ]
+    
+    # Find active patterns (both single-token and multi-token)
+    active_patterns = []
+    
+    # Check single-token and multi-token patterns
+    for start_pattern, end_pattern in patterns_to_check:
+        try:
+            start_tokens = processing_class.encode(start_pattern, add_special_tokens=False)
+            end_tokens = processing_class.encode(end_pattern, add_special_tokens=False)
+            
+            if len(start_tokens) > 0 and len(end_tokens) > 0:
+                active_patterns.append({
+                    'start_tokens': start_tokens,
+                    'end_tokens': end_tokens,
+                    'pattern_name': f"{start_pattern}...{end_pattern}"
+                })
+        except:
+            continue
+    
+    # Check Qwen2-style sequence patterns
+    for start_pattern, end_pattern in qwen2_patterns:
+        try:
+            # Split into components for sequence matching
+            start_parts = start_pattern.split(">")
+            if len(start_parts) == 2:  # "<|im_start|" and "tool"
+                part1_tokens = processing_class.encode(start_parts[0] + ">", add_special_tokens=False)
+                part2_tokens = processing_class.encode(start_parts[1], add_special_tokens=False)
+                end_tokens = processing_class.encode(end_pattern, add_special_tokens=False)
+                
+                if len(part1_tokens) > 0 and len(part2_tokens) > 0 and len(end_tokens) > 0:
+                    active_patterns.append({
+                        'sequence_pattern': True,
+                        'part1_tokens': part1_tokens,
+                        'part2_tokens': part2_tokens,
+                        'end_tokens': end_tokens,
+                        'pattern_name': start_pattern + "..." + end_pattern
+                    })
+        except:
+            continue
+            
+    # If no patterns found, return original mask
+    if not active_patterns:
+        return completion_mask
+        
+    # Create tool mask - start with ones (keep tokens)
+    tool_mask = torch.ones_like(completion_mask, dtype=completion_mask.dtype, device=device)
+    
+    # Process each sequence in the batch
+    for batch_idx in range(batch_size):
+        seq = completion_ids[batch_idx].cpu().tolist()
+        
+        # Check each active pattern
+        for pattern in active_patterns:
+            i = 0
+            while i < len(seq):
+                found_start = False
+                start_pos = i
+                
+                if pattern.get('sequence_pattern'):
+                    # Handle sequence patterns like <|im_start|>tool
+                    part1_len = len(pattern['part1_tokens'])
+                    part2_len = len(pattern['part2_tokens'])
+                    
+                    if (i + part1_len + part2_len <= len(seq) and
+                        seq[i:i + part1_len] == pattern['part1_tokens'] and
+                        seq[i + part1_len:i + part1_len + part2_len] == pattern['part2_tokens']):
+                        found_start = True
+                else:
+                    # Handle regular patterns
+                    start_len = len(pattern['start_tokens'])
+                    if (i + start_len <= len(seq) and
+                        seq[i:i + start_len] == pattern['start_tokens']):
+                        found_start = True
+                
+                if found_start:
+                    # Find the end pattern
+                    end_tokens = pattern['end_tokens']
+                    end_len = len(end_tokens)
+                    
+                    # Mask from start position
+                    j = start_pos
+                    tool_mask[batch_idx, j] = 0  # Mask start
+                    j += 1
+                    
+                    # Continue masking until we find the end pattern
+                    while j < len(seq):
+                        if (j + end_len <= len(seq) and 
+                            seq[j:j + end_len] == end_tokens):
+                            # Found end pattern - mask it too
+                            for k in range(end_len):
+                                tool_mask[batch_idx, j + k] = 0
+                            j += end_len
+                            break
+                        else:
+                            tool_mask[batch_idx, j] = 0  # Mask content
+                            j += 1
+                    
+                    i = j  # Jump past the masked region
+                else:
+                    i += 1
+                
+    # Apply the tool mask to the completion mask
+    return completion_mask * tool_mask
