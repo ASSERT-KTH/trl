@@ -1095,6 +1095,9 @@ class GRPOTrainer(Trainer):
                 prompts = [o["prompt"] for o in outputs]
                 completions = [o["completion"] for o in outputs]
                 tools = [o.get("tools", None) for o in outputs]
+                print(f"[DEBUG] prompts={len(prompts)}x{len(prompts[0]) if prompts else 0}, "
+                      f"completions={len(completions)}x{len(completions[0]) if completions else 0}, "
+                      f"tools={len(tools)}x{len(tools[0]) if tools and tools[0] else 0}")
 
                 # Prepare prompt input tensors
                 prompts_text = [
@@ -1110,6 +1113,7 @@ class GRPOTrainer(Trainer):
                 )
                 prompt_inputs = super()._prepare_inputs(prompt_inputs)  # Needed? Or is .to(device) better?
                 prompt_ids, prompt_mask = prompt_inputs["input_ids"], prompt_inputs["attention_mask"]
+                print(f"[DEBUG] prompt_ids={prompt_ids.shape}, prompt_mask={prompt_mask.shape}")
 
                 # Prepare completion input tensors
                 completions_text = [
@@ -1118,6 +1122,8 @@ class GRPOTrainer(Trainer):
                 ]
                 completion_ids = self.processing_class(completions_text)["input_ids"]
                 completion_lens = [len(ids) for ids in completion_ids]  # For masking right padding tokens
+                print(f"[DEBUG] completion_ids={len(completion_ids)}x{len(completion_ids[0]) if completion_ids else 0}, "
+                      f"completion_lens={len(completion_lens)}")
 
                 # Gather any extra keys for reward functions
                 extra_reward_kwargs = {}
