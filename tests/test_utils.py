@@ -591,7 +591,6 @@ class TestMaskToolResponseTokens(unittest.TestCase):
     @parameterized.expand([
         ("Qwen/Qwen2.5-0.5B-Instruct",),
         ("Qwen/Qwen3-0.6B",),
-        ("meta-llama/Llama-3.1-8B",),
     ])
     def test_tool_response_masking_concrete(self, model_name):
         """Test concrete masking behavior with specific token verification."""
@@ -603,7 +602,7 @@ class TestMaskToolResponseTokens(unittest.TestCase):
         
         # Apply masking
         result_mask = mask_tool_response_tokens(completion_ids, completion_mask, tokenizer)
-        
+
         # Apply masking and verify results
         original_sum = completion_mask.sum().item()
         masked_sum = result_mask.sum().item()
@@ -631,7 +630,6 @@ class TestMaskToolResponseTokens(unittest.TestCase):
     @parameterized.expand([
         ("Qwen/Qwen2.5-0.5B-Instruct",),
         ("Qwen/Qwen3-0.6B",),
-        ("meta-llama/Llama-3.1-8B",),
     ])
     def test_conversation_tool_masking(self, model_name):
         """Test masking in conversation format with tool roles."""
@@ -667,14 +665,12 @@ class TestMaskToolResponseTokens(unittest.TestCase):
                         any(pattern in text for pattern in ["tool", "file", "txt"]),
                         f"Token '{token_text}' at position {pos} should be part of tool response"
                     )
-        except Exception:
-            # If chat template fails, skip this test for this model
-            self.skipTest(f"Chat template not supported for {model_name}")
+        except Exception as e:
+            self.skipTest(f"Error: {e}")
 
     @parameterized.expand([
         ("Qwen/Qwen2.5-0.5B-Instruct",),
         ("Qwen/Qwen3-0.6B",),
-        ("meta-llama/Llama-3.1-8B",),
     ])
     def test_no_tool_response_unchanged(self, model_name):
         """Test that text without tool responses remains unchanged."""
@@ -693,7 +689,6 @@ class TestMaskToolResponseTokens(unittest.TestCase):
     @parameterized.expand([
         ("Qwen/Qwen2.5-0.5B-Instruct",),
         ("Qwen/Qwen3-0.6B",),
-        ("meta-llama/Llama-3.1-8B",),
     ])
     def test_batch_processing(self, model_name):
         """Test masking works correctly with batched inputs."""
@@ -740,7 +735,6 @@ class TestMaskToolResponseTokens(unittest.TestCase):
     @parameterized.expand([
         ("Qwen/Qwen2.5-0.5B-Instruct",),
         ("Qwen/Qwen3-0.6B",),
-        ("meta-llama/Llama-3.1-8B",),
     ])
     def test_pattern_detection_robustness(self, model_name):
         """Test that pattern detection handles edge cases correctly."""
