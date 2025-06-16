@@ -1216,11 +1216,7 @@ class GRPOTrainer(Trainer):
         # If mask_truncated_completions is enabled, zero out truncated completions in completion_mask
         if self.mask_truncated_completions:
             truncated_completions = ~is_eos.any(dim=1)
-            completion_mask = completion_mask * (~truncated_completions).unsqueeze(1).int()
-
-        # Mask tool response tokens if enabled and in async_server mode
-        if self.mask_tool_responses and self.vllm_mode == "async_server":
-            completion_mask = mask_tool_response_tokens(completion_ids, completion_mask, self.processing_class)
+            completion_mask = completion_mask * (~truncated_completions).unsqueeze(1).int() 
 
         # Concatenate prompt_mask with completion_mask for logit computation
         attention_mask = torch.cat([prompt_mask, completion_mask], dim=1)  # (B, P+C)
@@ -1391,12 +1387,17 @@ class GRPOTrainer(Trainer):
         # get the last hidden state of the model
         last_hidden_state = self._get_last_hidden_state(unwrapped_model, input_ids, attention_mask, logits_to_keep)
 
+        loss_mask = completion_mask
+        if self.mask_tool_responses:
+            assert self.vllm_mode == "async_server", "Only async_server mode has tool enabled generation and thus supports masking"
+            loss_mask = mask_tool_response_tokens(completion_ids, completion_mask, self.processing_class)
+
         # compute loss and metrics using liger grpo loss
         loss, metrics = self.liger_grpo_loss(
             _input=last_hidden_state,
             lin_weight=unwrapped_model.lm_head.weight,
             selected_token_ids=completion_ids,
-            attention_mask=completion_mask,
+            attention_mask=loss_mask,
             advantages=inputs["advantages"],
             bias=unwrapped_model.lm_head.bias,
             old_per_token_logps=inputs["old_per_token_logps"],
@@ -1417,6 +1418,7 @@ class GRPOTrainer(Trainer):
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         if return_outputs:
             raise ValueError("The GRPOTrainer does not support returning outputs")
+
         if self.use_liger_loss:
             # Compute the loss using the liger grpo loss
             unwrapped_model = self.accelerator.unwrap_model(model)
@@ -1473,12 +1475,18 @@ class GRPOTrainer(Trainer):
         if self.beta != 0.0:
             per_token_loss = per_token_loss + self.beta * per_token_kl
 
+        loss_mask = completion_mask
+        if self.mask_tool_responses:
+            assert self.vllm_mode == "async_server", "Only async_server mode has tool enabled generation and thus supports masking"
+            # we do not modify the completion_mask, as it is needed to get e.g. mean completion length
+            loss_mask = mask_tool_response_tokens(completion_ids, completion_mask, self.processing_class)
+
         if self.loss_type == "grpo":
-            loss = ((per_token_loss * completion_mask).sum(-1) / completion_mask.sum(-1).clamp(min=1.0)).mean()
+            loss = ((per_token_loss * loss_mask).sum(-1) / loss_mask.sum(-1).clamp(min=1.0)).mean()
         elif self.loss_type == "bnpo":
-            loss = (per_token_loss * completion_mask).sum() / completion_mask.sum().clamp(min=1.0)
+            loss = (per_token_loss * loss_mask).sum() / loss_mask.sum().clamp(min=1.0)
         elif self.loss_type == "dr_grpo":
-            loss = (per_token_loss * completion_mask).sum() / (per_token_loss.size(0) * self.max_completion_length)
+            loss = (per_token_loss * loss_mask).sum() / (per_token_loss.size(0) * self.max_completion_length)
         else:
             raise ValueError(f"Unknown loss type: {self.loss_type}")
 
@@ -1486,7 +1494,7 @@ class GRPOTrainer(Trainer):
         mode = "train" if self.model.training else "eval"
 
         if self.beta != 0.0:
-            mean_kl = (per_token_kl * completion_mask).sum() / completion_mask.sum()
+            mean_kl = (per_token_kl * loss_mask).sum() / loss_mask.sum()
             self._metrics[mode]["kl"].append(self.accelerator.gather_for_metrics(mean_kl).nanmean().item())
 
         # Compute the clipped probability ratios
@@ -1494,9 +1502,9 @@ class GRPOTrainer(Trainer):
         is_high_clipped = (coef_1 > 1 + self.epsilon_high) & (advantages.unsqueeze(1) > 0)
         is_region_clipped = is_low_clipped | is_high_clipped
 
-        low_clip = (is_low_clipped * completion_mask).sum() / completion_mask.sum()
-        high_clip = (is_high_clipped * completion_mask).sum() / completion_mask.sum()
-        clip_ratio = (is_region_clipped * completion_mask).sum() / completion_mask.sum()
+        low_clip = (is_low_clipped * loss_mask).sum() / loss_mask.sum()
+        high_clip = (is_high_clipped * loss_mask).sum() / loss_mask.sum()
+        clip_ratio = (is_region_clipped * loss_mask).sum() / loss_mask.sum()
 
         gathered_low_clip = self.accelerator.gather_for_metrics(low_clip)
         self._metrics[mode]["clip_ratio/low_mean"].append(gathered_low_clip.nanmean().item())

@@ -1936,4 +1936,4 @@ def mask_tool_response_tokens(
                     i += 1
                 
     # Apply the tool mask to the completion mask
-    return completion_mask * tool_mask
+    return completion_mask & tool_mask
