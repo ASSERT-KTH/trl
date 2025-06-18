@@ -1319,9 +1319,11 @@ class GRPOTrainer(Trainer):
         self._metrics[mode]["num_tokens"] = [self.state.num_input_tokens_seen]
 
         # Log all numbers from extra_reward_kwargs
-        for key, value in extra_reward_kwargs.items():
-            if isinstance(value, (int, float)):
-                self._metrics[mode][f"extra_kwargs/{key}"].append(value)
+        print("\n"*100)
+        for key, values in extra_reward_kwargs.items():
+            print(key, values)
+            if isinstance(values[0], (int, float)):  # should be a list
+                self._metrics[mode][f"extra_kwargs/{key}"].append(torch.tensor(values).mean().item())  # average e.g. tool_calls_shell
 
         # log completion lengths, mean, min, max
         agg_completion_mask = self.accelerator.gather_for_metrics(completion_mask.sum(1))
