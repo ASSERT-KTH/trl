@@ -905,7 +905,7 @@ class GRPOTrainer(Trainer):
                         continue  # skip FSDP subtrees already traversed
                     visited.add(full_name)
 
-                    if self.vllm_mode == "server" and self.accelerator.is_main_process:
+                    if self.vllm_mode in ["server", "async_server"] and self.accelerator.is_main_process:
                         self.vllm_client.update_named_param(full_name, param.data)
                     elif self.vllm_mode == "colocate":
                         llm_model = self.llm.llm_engine.model_executor.driver_worker.model_runner.model
