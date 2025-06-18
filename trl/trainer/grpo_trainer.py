@@ -1318,6 +1318,11 @@ class GRPOTrainer(Trainer):
             self.state.num_input_tokens_seen += self.accelerator.gather_for_metrics(attention_mask.sum()).sum().item()
         self._metrics[mode]["num_tokens"] = [self.state.num_input_tokens_seen]
 
+        # Log all numbers from extra_reward_kwargs
+        for key, value in extra_reward_kwargs.items():
+            if isinstance(value, (int, float)):
+                self._metrics[mode][f"extra_kwargs/{key}"].append(value)
+
         # log completion lengths, mean, min, max
         agg_completion_mask = self.accelerator.gather_for_metrics(completion_mask.sum(1))
         self._metrics[mode]["completions/mean_length"].append(agg_completion_mask.float().mean().item())
