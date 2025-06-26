@@ -14,6 +14,8 @@
 
 import argparse
 import importlib
+import os
+import sys
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -39,8 +41,8 @@ class GRPOScriptArguments(ScriptArguments):
             Reward model id of a pretrained model hosted inside a model repo on huggingface.co or local path to a
             directory containing model weights saved using [`~transformers.PreTrainedModel.save_pretrained`].
         reward_funcs (`list[str]` or `None`, *optional*, defaults to `None`):
-            Reward functions to use. It can be either one of  `"think_format_reward"`; or a dotted import path "
-            (e.g., `'my_lib.rewards.custom_reward'`).
+            Reward functions to use. It can be either one of `"think_format_reward"`; or a dotted import path " (e.g.,
+            `'my_lib.rewards.custom_reward'`).
     """
 
     reward_model_name_or_path: Optional[str] = field(
@@ -82,6 +84,7 @@ def main(script_args, training_args, model_args):
                 reward_funcs.append(reward_funcs_registry[func_name])
             elif "." in func_name:
                 module_path, func_name = func_name.rsplit(".", 1)
+                sys.path.insert(0, os.getcwd())
                 module = importlib.import_module(module_path)
                 reward_func = getattr(module, func_name)
                 reward_funcs.append(reward_func)
@@ -97,7 +100,7 @@ def main(script_args, training_args, model_args):
     # Initialize the GRPO trainer
     trainer = GRPOTrainer(
         model=model,
-        reward_funcs=reward_model,
+        reward_funcs=reward_funcs,
         args=training_args,
         train_dataset=dataset[script_args.dataset_train_split],
         eval_dataset=dataset[script_args.dataset_test_split] if training_args.eval_strategy != "no" else None,

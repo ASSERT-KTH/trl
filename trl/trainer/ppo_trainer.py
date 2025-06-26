@@ -19,6 +19,7 @@ import textwrap
 import time
 from collections import defaultdict
 from contextlib import contextmanager, nullcontext
+from pathlib import Path
 from typing import Optional, Union
 
 import numpy as np
@@ -108,7 +109,7 @@ class PPOTrainer(Trainer):
         ref_model: Optional[nn.Module],
         reward_model: nn.Module,
         train_dataset: Dataset,
-        value_model: Optional[nn.Module] = None,
+        value_model: nn.Module,
         data_collator: Optional[DataCollatorWithPadding] = None,
         eval_dataset: Optional[Union[Dataset, dict[str, Dataset]]] = None,
         # less commonly used
@@ -747,6 +748,15 @@ class PPOTrainer(Trainer):
                     table=df,
                 )
 
+    # Ensure the model card is saved along with the checkpoint
+    def _save_checkpoint(self, model, trial):
+        if self.args.hub_model_id is None:
+            model_name = Path(self.args.output_dir).name
+        else:
+            model_name = self.args.hub_model_id.split("/")[-1]
+        self.create_model_card(model_name=model_name)
+        super()._save_checkpoint(model, trial)
+
     def create_model_card(
         self,
         model_name: Optional[str] = None,
@@ -772,12 +782,18 @@ class PPOTrainer(Trainer):
         else:
             base_model = None
 
-        tags = tags or []
-        if isinstance(tags, str):
-            tags = [tags]
+        # normalize `tags` to a mutable set
+        if tags is None:
+            tags = set()
+        elif isinstance(tags, str):
+            tags = {tags}
+        else:
+            tags = set(tags)
 
         if hasattr(self.model.config, "unsloth_version"):
-            tags.append("unsloth")
+            tags.add("unsloth")
+
+        tags.update(self._tag_names)
 
         citation = textwrap.dedent("""\
         @article{mziegler2019fine-tuning,
