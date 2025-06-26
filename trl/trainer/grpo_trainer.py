@@ -1319,9 +1319,7 @@ class GRPOTrainer(Trainer):
         self._metrics[mode]["num_tokens"] = [self.state.num_input_tokens_seen]
 
         # Log all numbers from extra_reward_kwargs
-        print("\n"*100)
         for key, values in extra_reward_kwargs.items():
-            print(key, values)
             if isinstance(values[0], (int, float)):  # should be a list
                 self._metrics[mode][f"extra_kwargs/{key}"].append(torch.tensor(values).mean().item())  # average e.g. tool_calls_shell
 
