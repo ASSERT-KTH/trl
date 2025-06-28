@@ -1318,10 +1318,48 @@ class GRPOTrainer(Trainer):
             self.state.num_input_tokens_seen += self.accelerator.gather_for_metrics(attention_mask.sum()).sum().item()
         self._metrics[mode]["num_tokens"] = [self.state.num_input_tokens_seen]
 
-        # Log all numbers from extra_reward_kwargs
-        for key, values in extra_reward_kwargs.items():
-            if isinstance(values[0], (int, float)):  # should be a list
-                self._metrics[mode][f"extra_kwargs/{key}"].append(torch.tensor(values).mean().item())  # average e.g. tool_calls_shell
+        def _log_extra_kwargs(self, extra_reward_kwargs: dict[str, list], mode: str) -> None:
+            """
+            Add mean(values) for every numeric extra_reward_kwarg to self._metrics[mode].
+
+            Assumes self has `.accelerator`.
+            """
+            dprint = self.accelerator.print  # prints only from main process
+            for key, values in extra_reward_kwargs.items():
+                if not values:  # empty list – nothing to log
+                    continue
+
+                sample = values[0]
+
+                # ── try to coerce the whole list into a float tensor ───────────────────
+                try:
+                    if torch.is_tensor(sample):
+                        # list/tuple of tensors (same length per batch item)
+                        vals = torch.stack([v.float() for v in values], dim=0)  # (B, …)
+                    elif isinstance(sample, (int, float, bool)):
+                        # list of python scalars
+                        vals = torch.as_tensor(values, dtype=torch.float32)
+                    else:
+                        # strings, dicts, ragged tensors – can’t reduce to a scalar
+                        dprint(f"[skip] extra_kwargs/{key}: unsupported type {type(sample).__name__}")
+                        continue
+                except Exception as e:
+                    dprint(f"[skip] extra_kwargs/{key}: failed to convert to tensor – {e}")
+                    continue
+
+                # ── debug print (rank-0 only) ──────────────────────────────────────────
+                dprint(
+                    f"[DEBUG] extra_kwargs/{key}: shape={tuple(vals.shape)}, "
+                    f"dtype={vals.dtype}, mean={vals.mean().item():.4g}"
+                )
+
+                # ── gather across ranks + log mean ─────────────────────────────────────
+                vals = self.accelerator.gather_for_metrics(vals.reshape(-1))  # flatten first
+                self._metrics[mode][f"extra_kwargs/{key}"].append(vals.mean().item())
+        # ------------------------------------------------------------------------------
+
+        # … and inside your training loop, right after you build `extra_reward_kwargs`:
+        _log_extra_kwargs(self, extra_reward_kwargs, mode)
 
         # log completion lengths, mean, min, max
         agg_completion_mask = self.accelerator.gather_for_metrics(completion_mask.sum(1))
