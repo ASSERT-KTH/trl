@@ -617,6 +617,7 @@ class GRPOTrainer(Trainer):
         self._textual_logs = {
             "prompt": deque(maxlen=maxlen),
             "completion": deque(maxlen=maxlen),
+            "advantages": deque(maxlen=maxlen),
             "generated_diff": deque(maxlen=maxlen),
             "patch": deque(maxlen=maxlen),
             "rewards": defaultdict(lambda: deque(maxlen=maxlen)),
@@ -1311,8 +1312,9 @@ class GRPOTrainer(Trainer):
             self.accelerator.process_index * len(prompts),
             (self.accelerator.process_index + 1) * len(prompts),
         )
+        all_process_advantages = advantages.clone()  # keep the aggregated advantages for logging
         advantages = advantages[process_slice]
-
+        
         # Log the metrics
         if mode == "train":
             self.state.num_input_tokens_seen += self.accelerator.gather_for_metrics(attention_mask.sum()).sum().item()
@@ -1395,6 +1397,7 @@ class GRPOTrainer(Trainer):
         self._textual_logs["patch"].extend([x["patch"] for x in inputs])
         for i, name in enumerate(self.reward_func_names):
             self._textual_logs["rewards"][name].extend(rewards_per_func[:, i].tolist())
+        self._textual_logs["advantages"].extend(all_process_advantages.tolist())
 
         return {
             "prompt_ids": prompt_ids,
@@ -1589,6 +1592,7 @@ class GRPOTrainer(Trainer):
                     self._textual_logs["prompt"],
                     self._textual_logs["completion"],
                     self._textual_logs["rewards"],
+                    self._textual_logs["advantages"],
                     self.state.global_step,
                     self.num_completions_to_print,
                 )
