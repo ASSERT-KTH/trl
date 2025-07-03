@@ -611,9 +611,8 @@ class GRPOTrainer(Trainer):
         self.log_completions = args.log_completions
         self.wandb_log_unique_prompts = args.wandb_log_unique_prompts
         self.num_completions_to_print = args.num_completions_to_print
-        # maxlen is set to the total number of forward passes per step. This value of `maxlen` ensures we log only the
-        # final optimization step.
-        maxlen = self.accelerator.num_processes * args.per_device_train_batch_size * args.steps_per_generation
+
+        maxlen = self.accelerator.num_processes * args.per_device_train_batch_size * args.steps_per_generation * args.gradient_accumulation_steps
         self._textual_logs = {
             "prompt": deque(maxlen=maxlen),
             "completion": deque(maxlen=maxlen),
