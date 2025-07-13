@@ -79,25 +79,31 @@ class WeightSyncWorkerExtension:
         self.pynccl_comm = PyNcclCommunicator(pg, device=self.device) # type: ignore
         self.client_rank = world_size - 1
 
-    def update_named_param(self, name: str, dtype: torch.dtype, shape: Sequence[int]) -> None:
+    def update_named_param(self, name: str, dtype: str, shape: Sequence[int]) -> None:
         """
         Receives updated weights from the client process and updates the named parameter in the model.
 
         Args:
             name (`str`):
                 Name of the weight tensor being updated.
-            dtype (`torch.dtype`):
-                Data type of the weight tensor (e.g., `torch.float32`).
+            dtype (`str`):
+                Data type of the weight tensor as a string (e.g., `"torch.float32"`).
             shape (`Sequence[int]`):
                 Shape of the weight tensor.
         """
         if self.pynccl_comm is None:
             raise RuntimeError("Communicator not initialized. Call `init_communicator` first.")
 
-        weight = torch.empty(shape, dtype=dtype, device=self.device) # type: ignore
-        self.pynccl_comm.broadcast(weight, src=self.client_rank) # type: ignore 
+        dtype = getattr(torch, dtype.split(".")[-1])
+        # Allocate memory for the incoming weight tensor on the correct device.
+        weight = torch.empty(shape, dtype=dtype, device=self.device)
+
+        # Use NCCL to broadcast the updated weights from the client (src) to all workers.
+        self.pynccl_comm.broadcast(weight, src=self.client_rank)
         self.pynccl_comm.group.barrier()
-        self.model_runner.model.load_weights(weights=[(name, weight)]) # type: ignore
+
+        # Load the received weights into the model.
+        self.model_runner.model.load_weights(weights=[(name, weight)])
 
     def close_communicator(self) -> None:
         """
@@ -172,15 +178,12 @@ async def run_server(args: Namespace):
         """
         data = await request.json()
         name = data.get("name")
-        dtype_str = data.get("dtype")
-        shape = data.get("shape")
-        
-        dtype = getattr(torch, dtype_str.split(".")[-1])
-        shape_tuple = tuple(shape)
+        dtype = data.get("dtype")
+        shape = tuple(data.get("shape"))
         
         async def throttled_update():
             async with weight_update_semaphore:
-                await engine.collective_rpc("update_named_param", args=(name, dtype, shape_tuple))
+                await engine.collective_rpc("update_named_param", args=(name, dtype, shape))
         
         # fire and forget with throttling
         create_background_task(throttled_update())
