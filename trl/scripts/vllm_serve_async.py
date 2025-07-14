@@ -101,7 +101,6 @@ class WeightSyncWorkerExtension:
         print(f"Getting weight {name} with shape {shape} on device {self.device}", flush=True)
 
         # Use NCCL to broadcast the updated weights from the client (src) to all workers.
-        self.pynccl_comm.group.barrier()
         self.pynccl_comm.broadcast(weight, src=self.client_rank)
         self.pynccl_comm.group.barrier()
 
