@@ -38,7 +38,7 @@ from vllm.usage.usage_lib import UsageContext
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 # Weight update throttling
-MAX_CONCURRENT_WEIGHT_UPDATES = 10
+MAX_CONCURRENT_WEIGHT_UPDATES = 1
 weight_update_semaphore = asyncio.Semaphore(MAX_CONCURRENT_WEIGHT_UPDATES)
 
 # Track background tasks for cleanup
@@ -98,9 +98,14 @@ class WeightSyncWorkerExtension:
         # Allocate memory for the incoming weight tensor on the correct device.
         weight = torch.empty(shape, dtype=dtype, device=self.device)
 
+        print(f"Getting weight {name} with shape {shape} on device {self.device}", flush=True)
+
         # Use NCCL to broadcast the updated weights from the client (src) to all workers.
+        self.pynccl_comm.group.barrier()
         self.pynccl_comm.broadcast(weight, src=self.client_rank)
         self.pynccl_comm.group.barrier()
+
+        print(f"Loading weight {name} with shape {shape} on device {self.device}", flush=True)
 
         # Load the received weights into the model.
         self.model_runner.model.load_weights(weights=[(name, weight)])
@@ -191,8 +196,10 @@ async def run_server(args: Namespace):
 
     @app.post("/reset_prefix_cache")
     async def reset_prefix_cache(request: Request):
-        # fire and forget
-        create_background_task(engine.reset_prefix_cache())
+        async def throttled_reset():
+            async with weight_update_semaphore:
+                await engine.reset_prefix_cache()
+        create_background_task(throttled_reset())
         return {"status": "ok"}
 
     @app.post("/close_communicator")
