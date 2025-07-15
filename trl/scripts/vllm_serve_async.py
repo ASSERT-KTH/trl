@@ -98,13 +98,9 @@ class WeightSyncWorkerExtension:
         # Allocate memory for the incoming weight tensor on the correct device.
         weight = torch.empty(shape, dtype=dtype, device=self.device)
 
-        print(f"Getting weight {name} with shape {shape} on device {self.device}", flush=True)
-
         # Use NCCL to broadcast the updated weights from the client (src) to all workers.
         self.pynccl_comm.broadcast(weight, src=self.client_rank)
         self.pynccl_comm.group.barrier()
-
-        print(f"Loading weight {name} with shape {shape} on device {self.device}", flush=True)
 
         # Load the received weights into the model.
         self.model_runner.model.load_weights(weights=[(name, weight)])

@@ -1085,7 +1085,7 @@ class GRPOTrainer(Trainer):
                             guided_decoding_regex=self.guided_decoding_regex,
                         )
                 else:
-                    outputs = [None] * len(inputs)
+                    outputs = [None] * len(gathered_inputs)
 
                 # Broadcast outputs to all processes
                 outputs = broadcast_object_list(outputs, from_process=0)
