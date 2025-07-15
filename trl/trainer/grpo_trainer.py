@@ -1071,10 +1071,11 @@ class GRPOTrainer(Trainer):
                 )
                 completion_ids = completion_ids[process_slice]
             elif self.vllm_mode == "async_server":
+                gathered_inputs = gather_object(inputs)
                 if self.accelerator.is_main_process:
                     with profiling_context(self, "Async vLLM.generate"):
                         outputs = self.rollout_func(  # more lightweight than having to extend the VLLMClient as previously suggested
-                            data=gather_object(inputs),
+                            data=gathered_inputs,
                             repetition_penalty=self.repetition_penalty,
                             temperature=self.temperature,
                             top_p=self.top_p,
@@ -1342,24 +1343,15 @@ class GRPOTrainer(Trainer):
                         vals = torch.as_tensor(values, dtype=torch.float32)
                     else:
                         # strings, dicts, ragged tensors – can’t reduce to a scalar
-                        dprint(f"[skip] extra_kwargs/{key}: unsupported type {type(sample).__name__}")
                         continue
                 except Exception as e:
                     dprint(f"[skip] extra_kwargs/{key}: failed to convert to tensor – {e}")
                     continue
 
-                # ── debug print (rank-0 only) ──────────────────────────────────────────
-                dprint(
-                    f"[DEBUG] extra_kwargs/{key}: shape={tuple(vals.shape)}, "
-                    f"dtype={vals.dtype}, mean={vals.mean().item():.4g}"
-                )
-
-                # ── gather across ranks + log mean ─────────────────────────────────────
                 vals = self.accelerator.gather_for_metrics(vals.reshape(-1))  # flatten first
                 self._metrics[mode][f"extra_kwargs/{key}"].append(vals.mean().item())
-        # ------------------------------------------------------------------------------
 
-        # … and inside your training loop, right after you build `extra_reward_kwargs`:
+
         _log_extra_kwargs(self, extra_reward_kwargs, mode)
 
         # log completion lengths, mean, min, max
