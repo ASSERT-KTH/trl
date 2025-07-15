@@ -1321,11 +1321,9 @@ class GRPOTrainer(Trainer):
         self._metrics[mode]["num_tokens"] = [self.state.num_input_tokens_seen]
 
         def _log_extra_kwargs(self, extra_reward_kwargs: dict[str, list], mode: str) -> None:
-            """
-            Add mean(values) for every numeric extra_reward_kwarg to self._metrics[mode].
-
-            Assumes self has `.accelerator`.
-            """
+            if not self.accelerator.is_main_process:
+                return
+            
             dprint = self.accelerator.print  # prints only from main process
             for key, values in extra_reward_kwargs.items():
                 if not values:  # empty list – nothing to log
@@ -1333,7 +1331,7 @@ class GRPOTrainer(Trainer):
 
                 sample = values[0]
 
-                # ── try to coerce the whole list into a float tensor ───────────────────
+                # coerce the whole list into a float tensor
                 try:
                     if torch.is_tensor(sample):
                         # list/tuple of tensors (same length per batch item)
@@ -1348,7 +1346,6 @@ class GRPOTrainer(Trainer):
                     dprint(f"[skip] extra_kwargs/{key}: failed to convert to tensor – {e}")
                     continue
 
-                vals = self.accelerator.gather_for_metrics(vals.reshape(-1))  # flatten first
                 self._metrics[mode][f"extra_kwargs/{key}"].append(vals.mean().item())
 
 
