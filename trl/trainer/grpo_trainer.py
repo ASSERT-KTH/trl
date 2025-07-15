@@ -1382,7 +1382,7 @@ class GRPOTrainer(Trainer):
         self._textual_logs["prompt"].extend(gather_object(prompts_text))
         self._textual_logs["completion"].extend(gather_object(completions_text))
         self._textual_logs["generated_diff"].extend(gather_object(extra_reward_kwargs["generated_diff"]))
-        self._textual_logs["patch"].extend([x["patch"] for x in inputs])
+        self._textual_logs["patch"].extend(gather_object([x["patch"] for x in inputs]))
         for i, name in enumerate(self.reward_func_names):
             self._textual_logs["rewards"][name].extend(rewards_per_func[:, i].tolist())
         self._textual_logs["advantages"].extend(all_process_advantages.tolist())
@@ -1586,8 +1586,6 @@ class GRPOTrainer(Trainer):
                 )
 
             if self.args.report_to and "wandb" in self.args.report_to and wandb.run is not None:
-                import pandas as pd
-
                 table = {
                     "prompt": self._textual_logs["prompt"],
                     "completion": self._textual_logs["completion"],
