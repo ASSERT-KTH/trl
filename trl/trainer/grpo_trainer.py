@@ -947,8 +947,11 @@ class GRPOTrainer(Trainer):
                         continue
                     name = name.replace("modules_to_save.default.", "")
 
+                    params = [module.weight] + list(module.lora_A.values()) + list(module.lora_B.values())
+                    to_gather = [p for p in params if hasattr(p, "ds_tensor")]
+
                     # Gather base + A + B on this rank only for the merge
-                    with gather_if_zero3([module.weight] + list(module.lora_A.values()) + list(module.lora_B.values())):
+                    with gather_if_zero3(to_gather):
                         module.merge()  # In-place W += B@A*α
                         
                         if self.vllm_mode in ["server", "async_server"] and self.accelerator.is_main_process:
