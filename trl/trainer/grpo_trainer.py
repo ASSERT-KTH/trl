@@ -924,37 +924,40 @@ class GRPOTrainer(Trainer):
             gather_if_zero3 = nullcontext
 
         if is_peft_model(self.model):
-            # With PEFT and FSDP/DeepSpeed ZeRO Stage 3, we must gather the full model at once before merging, as
-            # merging adapters in a sharded manner is not supported.
-            # TODO: does this work with FSDP?
-            with gather_if_zero3(list(self.model.parameters())):
-                self.model.merge_adapter()
+            if self.is_fsdp_enabled:
+                # FSDP path temporarily disabled - needs different handling
+                raise NotImplementedError(
+                    "FSDP with PEFT is temporarily disabled in this implementation. "
+                    "The incremental gathering approach needs to be adapted for FSDP."
+                )
+            else:
+                # DeepSpeed ZeRO-3 with PEFT: Process each LoRA module individually
+                prefix = self.model.prefix
 
-                # Update vLLM weights while parameters are gathered
-                if self.is_fsdp_enabled:  # note if using FSDP, gather_if_zero3 is nullcontext
-                    # Update vLLM weights while parameters are gathered
-                    # For PEFT with FSDP we need to use the memory efficient post-order traversal
-                    self._sync_fsdp_params_to_vllm(self.model)
-                else:
-                    # DeepSpeed ZeRO-3 with PEFT
-                    for name, param in self.model.named_parameters():
-                        # When using PEFT, we need to recover the original parameter name and discard some parameters
-                        name = name.removeprefix("base_model.model.").replace(".base_layer", "")
-                        if self.model.prefix in name:
-                            continue
-                        # When module to save, remove its prefix and discard the original module
-                        if "original_module" in name:
-                            continue
-                        name = name.replace("modules_to_save.default.", "")
+                for mod_name, module in self.model.named_modules():
+                    if not hasattr(module, "merge"):  # Skip non-LoRA blocks
+                        continue
 
+                    # Apply the exact same filtering logic as original code
+                    name = f"{mod_name}.weight"
+                    name = name.removeprefix("base_model.model.").replace(".base_layer", "")
+                    if prefix in name:
+                        continue
+                    if "original_module" in name:
+                        continue
+                    name = name.replace("modules_to_save.default.", "")
+
+                    # Gather base + A + B on this rank only for the merge
+                    with gather_if_zero3([module.weight] + list(module.lora_A.values()) + list(module.lora_B.values())):
+                        module.merge()  # In-place W += B@A*α
+                        
                         if self.vllm_mode in ["server", "async_server"] and self.accelerator.is_main_process:
-                            self.vllm_client.update_named_param(name, param.data)
+                            self.vllm_client.update_named_param(name, module.weight.data)
                         elif self.vllm_mode == "colocate":
                             llm_model = self.llm.llm_engine.model_executor.driver_worker.model_runner.model
-                            llm_model.load_weights([(name, param.data)])
-                # Unmerge adapters while parameters are still gathered
-                self.model.unmerge_adapter()
-                # Parameters will automatically be repartitioned when exiting the context
+                            llm_model.load_weights([(name, module.weight.data)])
+                        
+                        module.unmerge()  # Keep training on LoRA
         else:
             # For non-PEFT models, simply gather (if needed) and update each parameter individually.
             if self.is_fsdp_enabled:
