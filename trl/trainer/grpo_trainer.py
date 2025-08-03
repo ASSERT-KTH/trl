@@ -1572,9 +1572,9 @@ class GRPOTrainer(Trainer):
         is_high_clipped = (coef_1 > 1 + self.epsilon_high) & (advantages.unsqueeze(1) > 0)
         is_region_clipped = is_low_clipped | is_high_clipped
 
-        low_clip = masked_batch_mean(is_low_clipped)
-        high_clip = masked_batch_mean(is_high_clipped)
-        clip_ratio = masked_batch_mean(is_region_clipped)
+        low_clip = masked_batch_mean(is_low_clipped.float())
+        high_clip = masked_batch_mean(is_high_clipped.float())
+        clip_ratio = masked_batch_mean(is_region_clipped.float())
 
         gathered_low_clip = self.accelerator.gather_for_metrics(low_clip)
         self._metrics[mode]["clip_ratio/low_mean"].append(gathered_low_clip.nanmean().item())
