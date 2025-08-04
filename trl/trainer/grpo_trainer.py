@@ -522,11 +522,12 @@ class GRPOTrainer(Trainer):
         self.mask_truncated_completions = args.mask_truncated_completions
         self.mask_tool_responses = args.mask_tool_responses
 
-        if self.use_liger_loss and not self.importance_sampling_level == "token":
-            raise NotImplementedError(
-                "Liger Kernels currently only support token-level importance sampling. Please set"
-                "`importance_sampling_level` to 'token'."
-            )
+        # Implemented this myself in: https://github.com/BjarniHaukur/Liger-Kernel
+        # if self.use_liger_loss and not self.importance_sampling_level == "token":
+        #     raise NotImplementedError(
+        #         "Liger Kernels currently only support token-level importance sampling. Please set"
+        #         "`importance_sampling_level` to 'token'."
+        #     )
 
         # Datasets
         self.shuffle_dataset = args.shuffle_dataset
