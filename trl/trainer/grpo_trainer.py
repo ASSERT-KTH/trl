@@ -49,6 +49,7 @@ from ..data_utils import apply_chat_template, is_conversational, maybe_apply_cha
 from ..extras.profiling import profiling_context, profiling_decorator
 from ..extras.vllm_client import VLLMClient
 from ..import_utils import is_liger_kernel_available, is_vllm_available
+from ..logging_utils import build_html_table
 from ..models import create_reference_model, prepare_deepspeed, prepare_fsdp, unwrap_model_for_generation
 from ..models.utils import _ForwardRedirection
 from .callbacks import SyncRefModelCallback
@@ -57,6 +58,7 @@ from .utils import (
     disable_dropout_in_model,
     generate_model_card,
     get_comet_experiment_url,
+    mask_tool_response_tokens,
     pad,
     print_prompt_completions_sample,
     selective_log_softmax,
@@ -79,6 +81,13 @@ if is_wandb_available():
 # What we call a reward function is a callable that takes a list of prompts and completions and returns a list of
 # rewards. When it's a string, it's a model ID, so it's loaded as a pretrained model.
 RewardFunc = Union[str, PreTrainedModel, Callable[[list, list], list[float]]]
+
+# (WIP) Allow users to have custom rollouts by making API calls to the trl vllm-serve server. This could e.g. be
+# ready-made AI products. 
+# What we call a rollout function is a callable that takes in the data and sampling parameters and returns a list of
+# generation results. Those results must include "prompt" and "completion" field and can include an optional "tools"
+# field. Any extra fields are forwarded to the reward functions.
+RolloutFunc = Callable[[dict[str, Any], dict[str, Any]], list[dict[str, Any]]]
 
 
 class RepeatSampler(Sampler):
@@ -333,10 +342,12 @@ class GRPOTrainer(Trainer):
                   [Using a custom reward function](#using-a-custom-reward-function).
             - A list of reward functions, where each item can independently be any of the above types. Mixing different
             types within the list (e.g., a string model ID and a custom reward function) is allowed.
+        rollout_func (`RolloutFunc`, *optional*, defaults to `None`):
+            Function to use for generating completions. It must take in the data and sampling parameters and return a list of
+            generation results. Those results must include "prompt" and "completion" field and can include optional "tools" field
+            and any other fields that are forwarded to the reward functions.
         args ([`GRPOConfig`], *optional*, defaults to `None`):
             Configuration for this trainer. If `None`, a default configuration is used.
-        vllm_client_cls (`Optional[Type[VLLMClient]]`, *optional*, defaults to `None`):
-            (async WIP) The vLLM client class to use (currently only for async vLLM). If `None`, the default vLLM client will be used.
         train_dataset ([`~datasets.Dataset`] or [`~datasets.IterableDataset`]):
             Dataset to use for training. It must include a column `"prompt"`. Any additional columns in the dataset is
             ignored. The format of the samples can be either:
@@ -380,7 +391,7 @@ class GRPOTrainer(Trainer):
         model: Union[str, PreTrainedModel],
         reward_funcs: Union[RewardFunc, list[RewardFunc]],
         args: Optional[GRPOConfig] = None,
-        vllm_client_cls: Optional[Type[VLLMClient]] = None,
+        rollout_func: Optional[RolloutFunc] = None,
         train_dataset: Optional[Union[Dataset, IterableDataset]] = None,
         eval_dataset: Optional[Union[Dataset, IterableDataset, dict[str, Union[Dataset, IterableDataset]]]] = None,
         processing_class: Optional[PreTrainedTokenizerBase] = None,
@@ -507,7 +518,16 @@ class GRPOTrainer(Trainer):
         self.use_liger_loss = args.use_liger_loss
         self.loss_type = args.loss_type
         self.scale_rewards = args.scale_rewards
+        self.importance_sampling_level = args.importance_sampling_level
         self.mask_truncated_completions = args.mask_truncated_completions
+        self.mask_tool_responses = args.mask_tool_responses
+
+        # Implemented this myself in: https://github.com/BjarniHaukur/Liger-Kernel
+        # if self.use_liger_loss and not self.importance_sampling_level == "token":
+        #     raise NotImplementedError(
+        #         "Liger Kernels currently only support token-level importance sampling. Please set"
+        #         "`importance_sampling_level` to 'token'."
+        #     )
 
         # Datasets
         self.shuffle_dataset = args.shuffle_dataset
@@ -591,6 +611,7 @@ class GRPOTrainer(Trainer):
                 use_ref_model=self.beta != 0.0,
                 loss_type=self.loss_type,
                 max_completion_length=self.max_completion_length,
+                importance_sampling_level=self.importance_sampling_level,
             )
 
         # Initialize the metrics
@@ -599,12 +620,14 @@ class GRPOTrainer(Trainer):
         self.log_completions = args.log_completions
         self.wandb_log_unique_prompts = args.wandb_log_unique_prompts
         self.num_completions_to_print = args.num_completions_to_print
-        # maxlen is set to the total number of forward passes per step. This value of `maxlen` ensures we log only the
-        # final optimization step.
-        maxlen = self.accelerator.num_processes * args.per_device_train_batch_size * args.steps_per_generation
+
+        maxlen = self.accelerator.num_processes * args.per_device_train_batch_size * args.steps_per_generation * args.gradient_accumulation_steps
         self._textual_logs = {
             "prompt": deque(maxlen=maxlen),
             "completion": deque(maxlen=maxlen),
+            "advantages": deque(maxlen=maxlen),
+            "generated_diff": deque(maxlen=maxlen),
+            "patch": deque(maxlen=maxlen),
             "rewards": defaultdict(lambda: deque(maxlen=maxlen)),
         }
 
@@ -622,18 +645,18 @@ class GRPOTrainer(Trainer):
             
             if hasattr(model.config, "quantization_config"):
                 raise ValueError("vLLM weight syncing does not currently support quantized models. Please use a non-quantized model.")
+            
+            # TODO: Temp hack?
+            if self.vllm_mode == "async_server":
+                if rollout_func is None:
+                    raise ValueError("rollout_func must be provided when vllm_mode is 'async_server'")
+                self.rollout_func = rollout_func
+            else:
+                if rollout_func is not None:
+                    raise ValueError("rollout_func must be None when vllm_mode is not 'async_server'")
 
-            if self.vllm_mode == "server" and self.accelerator.is_main_process:
-                if vllm_client_cls:
-                    raise ValueError("(WIP) vllm_client_cls must be None when vllm_mode is 'server'")
+            if self.vllm_mode in ["server", "async_server"] and self.accelerator.is_main_process:
                 self.vllm_client = VLLMClient(
-                    args.vllm_server_host, args.vllm_server_port, connection_timeout=args.vllm_server_timeout
-                )
-                self.vllm_client.init_communicator()
-            elif self.vllm_mode == "async_server":
-                if not vllm_client_cls:
-                    raise ValueError("(WIP) vllm_client_cls must be provided when vllm_mode is 'async_server'")
-                self.vllm_client = vllm_client_cls(
                     args.vllm_server_host, args.vllm_server_port, connection_timeout=args.vllm_server_timeout
                 )
                 self.vllm_client.init_communicator()
@@ -811,6 +834,7 @@ class GRPOTrainer(Trainer):
             seed=self.args.seed,
         )
 
+
     def _enable_gradient_checkpointing(self, model: PreTrainedModel, args: GRPOConfig) -> PreTrainedModel:
         """Enables gradient checkpointing for the model."""
         # Ensure use_cache is disabled
@@ -890,7 +914,7 @@ class GRPOTrainer(Trainer):
                         continue  # skip FSDP subtrees already traversed
                     visited.add(full_name)
 
-                    if self.vllm_mode == "server" and self.accelerator.is_main_process:
+                    if self.vllm_mode in ["server", "async_server"] and self.accelerator.is_main_process:
                         self.vllm_client.update_named_param(full_name, param.data)
                     elif self.vllm_mode == "colocate":
                         llm_model = self.llm.llm_engine.model_executor.driver_worker.model_runner.model
@@ -909,37 +933,57 @@ class GRPOTrainer(Trainer):
             gather_if_zero3 = nullcontext
 
         if is_peft_model(self.model):
-            # With PEFT and FSDP/DeepSpeed ZeRO Stage 3, we must gather the full model at once before merging, as
-            # merging adapters in a sharded manner is not supported.
-            # TODO: does this work with FSDP?
-            with gather_if_zero3(list(self.model.parameters())):
-                self.model.merge_adapter()
+            if self.is_fsdp_enabled:
+                # FSDP path temporarily disabled - needs different handling
+                raise NotImplementedError(
+                    "FSDP with PEFT is temporarily disabled in this implementation. "
+                    "The incremental gathering approach needs to be adapted for FSDP."
+                )
+            else:
+                # DeepSpeed ZeRO-3 with PEFT: Process each LoRA module individually
+                prefix = self.model.prefix
 
-                # Update vLLM weights while parameters are gathered
-                if self.is_fsdp_enabled:  # note if using FSDP, gather_if_zero3 is nullcontext
-                    # Update vLLM weights while parameters are gathered
-                    # For PEFT with FSDP we need to use the memory efficient post-order traversal
-                    self._sync_fsdp_params_to_vllm(self.model)
-                else:
-                    # DeepSpeed ZeRO-3 with PEFT
-                    for name, param in self.model.named_parameters():
-                        # When using PEFT, we need to recover the original parameter name and discard some parameters
-                        name = name.removeprefix("base_model.model.").replace(".base_layer", "")
-                        if self.model.prefix in name:
-                            continue
-                        # When module to save, remove its prefix and discard the original module
-                        if "original_module" in name:
-                            continue
-                        name = name.replace("modules_to_save.default.", "")
+                for mod_name, module in self.model.named_modules():
+                    if not hasattr(module, "merge"):  # Skip non-LoRA blocks
+                        continue
 
+                    # Apply the exact same filtering logic as original code
+                    name = f"{mod_name}.weight"
+                    name = name.removeprefix("base_model.model.").replace(".base_layer", "")
+                    if prefix in name:
+                        continue
+                    if "original_module" in name:
+                        continue
+                    name = name.replace("modules_to_save.default.", "")
+
+                    # Gather only the sharded parameters for this module before merging.
+                    # Some LoRA layers (e.g. embeddings) register their parameters in submodules, so we rely on
+                    # `module.parameters()` to cover every tensor the merge/unmerge logic touches instead of manually
+                    # enumerating A/B weights.
+                    to_gather = []
+                    if zero_stage_3:
+                        seen = set()
+                        for param in module.parameters():
+                            if not hasattr(param, "ds_tensor"):
+                                continue
+                            if id(param) in seen:
+                                continue
+                            seen.add(id(param))
+                            to_gather.append(param)
+
+                    gather_ctx = gather_if_zero3(to_gather) if to_gather else nullcontext()
+
+                    # Gather base + LoRA tensors on this rank only for the merge
+                    with gather_ctx:
+                        module.merge()  # In-place W += B@A*α
+                        
                         if self.vllm_mode in ["server", "async_server"] and self.accelerator.is_main_process:
-                            self.vllm_client.update_named_param(name, param.data)
+                            self.vllm_client.update_named_param(name, module.weight.data)
                         elif self.vllm_mode == "colocate":
                             llm_model = self.llm.llm_engine.model_executor.driver_worker.model_runner.model
-                            llm_model.load_weights([(name, param.data)])
-                # Unmerge adapters while parameters are still gathered
-                self.model.unmerge_adapter()
-                # Parameters will automatically be repartitioned when exiting the context
+                            llm_model.load_weights([(name, module.weight.data)])
+                        
+                        module.unmerge()  # Keep training on LoRA
         else:
             # For non-PEFT models, simply gather (if needed) and update each parameter individually.
             if self.is_fsdp_enabled:
@@ -1056,20 +1100,21 @@ class GRPOTrainer(Trainer):
                 )
                 completion_ids = completion_ids[process_slice]
             elif self.vllm_mode == "async_server":
+                gathered_inputs = gather_object(inputs)
                 if self.accelerator.is_main_process:
                     with profiling_context(self, "Async vLLM.generate"):
-                        outputs = self.vllm_client.generate(
-                            data=gather_object(inputs),
+                        outputs = self.rollout_func(  # more lightweight than having to extend the VLLMClient as previously suggested
+                            data=gathered_inputs,
                             repetition_penalty=self.repetition_penalty,
                             temperature=self.temperature,
                             top_p=self.top_p,
                             top_k=-1 if self.top_k is None else self.top_k,
                             min_p=0.0 if self.min_p is None else self.min_p,
                             max_tokens=self.max_completion_length,
-                            # guided_decoding_regex=self.guided_decoding_regex,
+                            guided_decoding_regex=self.guided_decoding_regex,
                         )
                 else:
-                    outputs = [None] * len(inputs)
+                    outputs = [None] * len(gathered_inputs)
 
                 # Broadcast outputs to all processes
                 outputs = broadcast_object_list(outputs, from_process=0)
@@ -1156,7 +1201,8 @@ class GRPOTrainer(Trainer):
             # Pad the completions, and concatenate them with the prompts
             completion_ids = [torch.tensor(ids, device=device) for ids in completion_ids]
             completion_ids = pad(completion_ids, padding_value=self.processing_class.pad_token_id)
-            prompt_completion_ids = torch.cat([prompt_ids, completion_ids], dim=1)
+            max_length = self.args.max_prompt_length + self.args.max_completion_length
+            prompt_completion_ids = torch.cat([prompt_ids, completion_ids], dim=1)[:, :max_length]
         else:
             # Regular generation path
             with unwrap_model_for_generation(
@@ -1176,6 +1222,8 @@ class GRPOTrainer(Trainer):
             prompt_ids = prompt_completion_ids[:, :prompt_length]
             completion_ids = prompt_completion_ids[:, prompt_length:]
 
+        is_eos = completion_ids == self.processing_class.eos_token_id
+
         if self.multi_turn and self.vllm_mode == "async_server": # TODO: Fix
             # Create an integer mask based on completion lengths to mask right padding tokens
             max_completion_len = completion_ids.size(1)
@@ -1184,7 +1232,6 @@ class GRPOTrainer(Trainer):
             completion_mask = (indices < completion_lens_tensor).int()  # all except last eos which is supposed to be there
         else:
             # Mask everything after the first EOS token
-            is_eos = completion_ids == self.processing_class.eos_token_id
             eos_idx = torch.full((is_eos.size(0),), is_eos.size(1), dtype=torch.long, device=device)
             eos_idx[is_eos.any(dim=1)] = is_eos.int().argmax(dim=1)[is_eos.any(dim=1)]
             sequence_indices = torch.arange(is_eos.size(1), device=device).expand(is_eos.size(0), -1)
@@ -1199,7 +1246,7 @@ class GRPOTrainer(Trainer):
         # If mask_truncated_completions is enabled, zero out truncated completions in completion_mask
         if self.mask_truncated_completions:
             truncated_completions = ~is_eos.any(dim=1)
-            completion_mask = completion_mask * (~truncated_completions).unsqueeze(1).int()
+            completion_mask = completion_mask * (~truncated_completions).unsqueeze(1).int() 
 
         # Concatenate prompt_mask with completion_mask for logit computation
         attention_mask = torch.cat([prompt_mask, completion_mask], dim=1)  # (B, P+C)
@@ -1294,12 +1341,44 @@ class GRPOTrainer(Trainer):
             self.accelerator.process_index * len(prompts),
             (self.accelerator.process_index + 1) * len(prompts),
         )
+        all_process_advantages = advantages.clone()  # keep the aggregated advantages for logging
         advantages = advantages[process_slice]
-
+        
         # Log the metrics
         if mode == "train":
             self.state.num_input_tokens_seen += self.accelerator.gather_for_metrics(attention_mask.sum()).sum().item()
         self._metrics[mode]["num_tokens"] = [self.state.num_input_tokens_seen]
+
+        def _log_extra_kwargs(self, extra_reward_kwargs: dict[str, list], mode: str) -> None:
+            if not self.accelerator.is_main_process:
+                return
+            
+            dprint = self.accelerator.print  # prints only from main process
+            for key, values in extra_reward_kwargs.items():
+                if not values:  # empty list – nothing to log
+                    continue
+
+                sample = values[0]
+
+                # coerce the whole list into a float tensor
+                try:
+                    if torch.is_tensor(sample):
+                        # list/tuple of tensors (same length per batch item)
+                        vals = torch.stack([v.float() for v in values], dim=0)  # (B, …)
+                    elif isinstance(sample, (int, float, bool)):
+                        # list of python scalars
+                        vals = torch.as_tensor(values, dtype=torch.float32)
+                    else:
+                        # strings, dicts, ragged tensors – can’t reduce to a scalar
+                        continue
+                except Exception as e:
+                    dprint(f"[skip] extra_kwargs/{key}: failed to convert to tensor – {e}")
+                    continue
+
+                self._metrics[mode][f"extra_kwargs/{key}"].append(vals.mean().item())
+
+
+        _log_extra_kwargs(self, extra_reward_kwargs, mode)
 
         # log completion lengths, mean, min, max
         agg_completion_mask = self.accelerator.gather_for_metrics(completion_mask.sum(1))
@@ -1331,8 +1410,11 @@ class GRPOTrainer(Trainer):
         # Log prompt and completion texts
         self._textual_logs["prompt"].extend(gather_object(prompts_text))
         self._textual_logs["completion"].extend(gather_object(completions_text))
+        self._textual_logs["generated_diff"].extend(gather_object(extra_reward_kwargs["generated_diff"]))
+        self._textual_logs["patch"].extend(gather_object([x["patch"] for x in inputs]))
         for i, name in enumerate(self.reward_func_names):
             self._textual_logs["rewards"][name].extend(rewards_per_func[:, i].tolist())
+        self._textual_logs["advantages"].extend(all_process_advantages.tolist())
 
         return {
             "prompt_ids": prompt_ids,
@@ -1368,12 +1450,17 @@ class GRPOTrainer(Trainer):
         # get the last hidden state of the model
         last_hidden_state = self._get_last_hidden_state(unwrapped_model, input_ids, attention_mask, logits_to_keep)
 
+        loss_mask = completion_mask
+        if self.mask_tool_responses:
+            assert self.vllm_mode == "async_server", "Only async_server mode has tool enabled generation and thus supports masking"
+            loss_mask = mask_tool_response_tokens(completion_ids, completion_mask, self.processing_class)
+
         # compute loss and metrics using liger grpo loss
         loss, metrics = self.liger_grpo_loss(
             _input=last_hidden_state,
             lin_weight=unwrapped_model.lm_head.weight,
             selected_token_ids=completion_ids,
-            attention_mask=completion_mask,
+            attention_mask=loss_mask,
             advantages=inputs["advantages"],
             bias=unwrapped_model.lm_head.bias,
             old_per_token_logps=inputs["old_per_token_logps"],
@@ -1394,6 +1481,7 @@ class GRPOTrainer(Trainer):
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         if return_outputs:
             raise ValueError("The GRPOTrainer does not support returning outputs")
+
         if self.use_liger_loss:
             # Compute the loss using the liger grpo loss
             unwrapped_model = self.accelerator.unwrap_model(model)
@@ -1435,7 +1523,22 @@ class GRPOTrainer(Trainer):
         old_per_token_logps = (
             per_token_logps.detach() if inputs["old_per_token_logps"] is None else inputs["old_per_token_logps"]
         )
-        coef_1 = torch.exp(per_token_logps - old_per_token_logps)
+        
+        log_ratio = per_token_logps - old_per_token_logps
+        if self.importance_sampling_level == "token":
+            log_importance_weights = log_ratio
+        elif self.importance_sampling_level == "sequence":
+            log_importance_weights = (log_ratio * completion_mask).sum(-1) / completion_mask.sum(-1).clamp(min=1.0)
+            log_importance_weights = log_importance_weights.unsqueeze(-1)
+        else:
+            raise ValueError(
+                f"Unknown importance sampling level: {self.importance_sampling_level}. Possible values are 'token' "
+                "and 'sequence'."
+            )
+        
+        # From here, log_importance_weights (and all subsequent tensors, coef_1, coef_2, etc.) shape depends on
+        # importance_sampling_level: "token" level: (B, T); "sequence" level: (B, 1)
+        coef_1 = torch.exp(log_importance_weights)
         coef_2 = torch.clamp(coef_1, 1 - self.epsilon_low, 1 + self.epsilon_high)
 
         if self.args.delta is not None:
@@ -1450,20 +1553,34 @@ class GRPOTrainer(Trainer):
         if self.beta != 0.0:
             per_token_loss = per_token_loss + self.beta * per_token_kl
 
+        loss_mask = completion_mask
+        if self.mask_tool_responses:
+            assert self.vllm_mode == "async_server", "Only async_server mode has tool enabled generation and thus supports masking"
+            # we do not modify the completion_mask, as it is needed to get e.g. mean completion length
+            loss_mask = mask_tool_response_tokens(completion_ids, completion_mask, self.processing_class)
+
         if self.loss_type == "grpo":
-            loss = ((per_token_loss * completion_mask).sum(-1) / completion_mask.sum(-1).clamp(min=1.0)).mean()
+            loss = ((per_token_loss * loss_mask).sum(-1) / loss_mask.sum(-1).clamp(min=1.0)).mean()
         elif self.loss_type == "bnpo":
-            loss = (per_token_loss * completion_mask).sum() / completion_mask.sum().clamp(min=1.0)
+            loss = (per_token_loss * loss_mask).sum() / loss_mask.sum().clamp(min=1.0)
         elif self.loss_type == "dr_grpo":
-            loss = (per_token_loss * completion_mask).sum() / (per_token_loss.size(0) * self.max_completion_length)
+            loss = (per_token_loss * loss_mask).sum() / (per_token_loss.size(0) * self.max_completion_length)
         else:
             raise ValueError(f"Unknown loss type: {self.loss_type}")
 
         # Log the metrics
         mode = "train" if self.model.training else "eval"
 
+        completion_token_count = loss_mask.sum().clamp(min=1.0)
+
+        def masked_batch_mean(x):
+            if x.shape[1] == 1:  # when importance_sampling_level == "sequence"
+                return x.mean()
+            else:
+                return (x * completion_mask).sum() / completion_token_count
+
         if self.beta != 0.0:
-            mean_kl = (per_token_kl * completion_mask).sum() / completion_mask.sum()
+            mean_kl = masked_batch_mean(per_token_kl)
             self._metrics[mode]["kl"].append(self.accelerator.gather_for_metrics(mean_kl).nanmean().item())
 
         # Compute the clipped probability ratios
@@ -1471,9 +1588,9 @@ class GRPOTrainer(Trainer):
         is_high_clipped = (coef_1 > 1 + self.epsilon_high) & (advantages.unsqueeze(1) > 0)
         is_region_clipped = is_low_clipped | is_high_clipped
 
-        low_clip = (is_low_clipped * completion_mask).sum() / completion_mask.sum()
-        high_clip = (is_high_clipped * completion_mask).sum() / completion_mask.sum()
-        clip_ratio = (is_region_clipped * completion_mask).sum() / completion_mask.sum()
+        low_clip = masked_batch_mean(is_low_clipped.float())
+        high_clip = masked_batch_mean(is_high_clipped.float())
+        clip_ratio = masked_batch_mean(is_region_clipped.float())
 
         gathered_low_clip = self.accelerator.gather_for_metrics(low_clip)
         self._metrics[mode]["clip_ratio/low_mean"].append(gathered_low_clip.nanmean().item())
@@ -1515,23 +1632,20 @@ class GRPOTrainer(Trainer):
                     self._textual_logs["prompt"],
                     self._textual_logs["completion"],
                     self._textual_logs["rewards"],
+                    self._textual_logs["advantages"],
                     self.state.global_step,
                     self.num_completions_to_print,
                 )
 
             if self.args.report_to and "wandb" in self.args.report_to and wandb.run is not None:
-                import pandas as pd
-
                 table = {
-                    "step": [str(self.state.global_step)] * len(self._textual_logs["prompt"]),
                     "prompt": self._textual_logs["prompt"],
                     "completion": self._textual_logs["completion"],
+                    "generated_diff": self._textual_logs["generated_diff"],
+                    "patch": self._textual_logs["patch"],
                     **self._textual_logs["rewards"],
                 }
-                df = pd.DataFrame(table)
-                if self.wandb_log_unique_prompts:
-                    df = df.drop_duplicates(subset=["prompt"])
-                wandb.log({"completions": wandb.Table(dataframe=df)})
+                wandb.log({"table": wandb.Html(build_html_table(table))})
 
     def create_model_card(
         self,

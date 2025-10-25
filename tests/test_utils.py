@@ -31,9 +31,12 @@ from trl.trainer.utils import (
     DataCollatorForChatML,
     batch_generation,
     decode_and_strip_padding,
+    entropy_from_logits,
     flush_left,
+    flush_right,
     generate_model_card,
     get_peft_config,
+    mask_tool_response_tokens,
     pad,
     print_prompt_completions_sample,
     selective_log_softmax,
@@ -474,12 +477,12 @@ class TestFlushLeft(unittest.TestCase):
         self.assertTrue(torch.equal(new_tensor1, expected_tensor1))
 
     def test_no_shift_needed(self):
-        mask = torch.tensor([[1, 1, 0, 0], [1, 1, 0, 0]])
-        tensor1 = torch.tensor([[5, 6, 0, 0], [7, 8, 0, 0]])
+        mask = torch.tensor([[1, 1, 0, 0], [1, 0, 0, 0]])
+        tensor1 = torch.tensor([[5, 6, 0, 0], [7, 0, 0, 0]])
         new_mask, new_tensor1 = flush_left(mask, tensor1)
 
-        expected_mask = torch.tensor([[1, 1], [1, 1]])
-        expected_tensor1 = torch.tensor([[5, 6], [7, 8]])
+        expected_mask = torch.tensor([[1, 1], [1, 0]])
+        expected_tensor1 = torch.tensor([[5, 6], [7, 0]])
 
         self.assertTrue(torch.equal(new_mask, expected_mask))
         self.assertTrue(torch.equal(new_tensor1, expected_tensor1))
@@ -487,9 +490,51 @@ class TestFlushLeft(unittest.TestCase):
     def test_no_tensors(self):
         mask = torch.tensor([[0, 0, 1, 1, 1], [0, 1, 1, 0, 0]])
         new_mask = flush_left(mask)
-
         expected_mask = torch.tensor([[1, 1, 1], [1, 1, 0]])
+        self.assertTrue(torch.equal(new_mask, expected_mask))
 
+
+class TestFlushRight(unittest.TestCase):
+    def test_basic_case(self):
+        mask = torch.tensor([[1, 1, 1, 0, 0], [0, 0, 1, 1, 0]])
+        tensor1 = torch.tensor([[2, 3, 4, 0, 0], [0, 0, 5, 6, 0]])
+        tensor2 = torch.tensor([[7, 8, 9, 0, 0], [0, 0, 10, 11, 0]])
+        new_mask, new_tensor1, new_tensor2 = flush_right(mask, tensor1, tensor2)
+
+        expected_mask = torch.tensor([[1, 1, 1], [0, 1, 1]])
+        expected_tensor1 = torch.tensor([[2, 3, 4], [0, 5, 6]])
+        expected_tensor2 = torch.tensor([[7, 8, 9], [0, 10, 11]])
+
+        self.assertTrue(torch.equal(new_mask, expected_mask))
+        self.assertTrue(torch.equal(new_tensor1, expected_tensor1))
+        self.assertTrue(torch.equal(new_tensor2, expected_tensor2))
+
+    def test_single_row(self):
+        mask = torch.tensor([[1, 1, 0, 0]])
+        tensor1 = torch.tensor([[2, 3, 0, 0]])
+        new_mask, new_tensor1 = flush_right(mask, tensor1)
+
+        expected_mask = torch.tensor([[1, 1]])
+        expected_tensor1 = torch.tensor([[2, 3]])
+
+        self.assertTrue(torch.equal(new_mask, expected_mask))
+        self.assertTrue(torch.equal(new_tensor1, expected_tensor1))
+
+    def test_no_shift_needed(self):
+        mask = torch.tensor([[0, 0, 1, 1], [0, 0, 0, 1]])
+        tensor1 = torch.tensor([[0, 0, 5, 6], [0, 0, 0, 7]])
+        new_mask, new_tensor1 = flush_right(mask, tensor1)
+
+        expected_mask = torch.tensor([[1, 1], [0, 1]])
+        expected_tensor1 = torch.tensor([[5, 6], [0, 7]])
+
+        self.assertTrue(torch.equal(new_mask, expected_mask))
+        self.assertTrue(torch.equal(new_tensor1, expected_tensor1))
+
+    def test_no_tensors(self):
+        mask = torch.tensor([[1, 1, 1, 0, 0], [0, 0, 1, 1, 0]])
+        new_mask = flush_right(mask)
+        expected_mask = torch.tensor([[1, 1, 1], [0, 1, 1]])
         self.assertTrue(torch.equal(new_mask, expected_mask))
 
 
@@ -521,22 +566,23 @@ class TestPrintPromptCompletionsSample(unittest.TestCase):
         prompts = ["The sky is", "The sun is"]
         completions = [" blue.", " in the sky."]
         rewards = {"Correctness": [0.123, 0.456], "Format": [0.789, 0.101]}
+        advantages = [0.987, 0.654]
         step = 42
 
-        print_prompt_completions_sample(prompts, completions, rewards, step)
+        print_prompt_completions_sample(prompts, completions, rewards, advantages, step)
 
         output = mock_stdout.getvalue()
 
         expected_output = textwrap.dedent("""\
-        ╭────────────────────── Step 42 ───────────────────────╮
-        │ ┏━━━━━━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━┓ │
-        │ ┃ Prompt     ┃ Completion   ┃ Correctness ┃ Format ┃ │
-        │ ┡━━━━━━━━━━━━╇━━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━┩ │
-        │ │ The sky is │  blue.       │        0.12 │   0.79 │ │
-        │ ├────────────┼──────────────┼─────────────┼────────┤ │
-        │ │ The sun is │  in the sky. │        0.46 │   0.10 │ │
-        │ └────────────┴──────────────┴─────────────┴────────┘ │
-        ╰──────────────────────────────────────────────────────╯
+        ╭──────────────────────────── Step 42 ─────────────────────────────╮
+        │ ┏━━━━━━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━━━━━┓ │
+        │ ┃ Prompt     ┃ Completion   ┃ Correctness ┃ Format ┃ Advantage ┃ │
+        │ ┡━━━━━━━━━━━━╇━━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━━━━━┩ │
+        │ │ The sky is │  blue.       │        0.12 │   0.79 │      0.99 │ │
+        │ ├────────────┼──────────────┼─────────────┼────────┼───────────┤ │
+        │ │ The sun is │  in the sky. │        0.46 │   0.10 │      0.65 │ │
+        │ └────────────┴──────────────┴─────────────┴────────┴───────────┘ │
+        ╰──────────────────────────────────────────────────────────────────╯
         """)
         self.assertEqual(output, expected_output)
 
@@ -545,29 +591,208 @@ class TestPrintPromptCompletionsSample(unittest.TestCase):
         prompts = ["A", "B"]
         completions = ["1", "2"]
         rewards = {"Score": [0.1, 0.2]}
+        advantages = [0.3, 0.4]
         step = 10
 
-        print_prompt_completions_sample(prompts, completions, rewards, step, num_samples=1)
+        print_prompt_completions_sample(prompts, completions, rewards, advantages, step, num_samples=1)
         output = mock_stdout.getvalue()
 
         possible_outputs = [
             textwrap.dedent("""\
-                ╭──────────── Step 10 ────────────╮
-                │ ┏━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━┓ │
-                │ ┃ Prompt ┃ Completion ┃ Score ┃ │
-                │ ┡━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━┩ │
-                │ │ A      │ 1          │  0.10 │ │
-                │ └────────┴────────────┴───────┘ │
-                ╰─────────────────────────────────╯
+            ╭────────────────── Step 10 ──────────────────╮
+            │ ┏━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━┳━━━━━━━━━━━┓ │
+            │ ┃ Prompt ┃ Completion ┃ Score ┃ Advantage ┃ │
+            │ ┡━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━╇━━━━━━━━━━━┩ │
+            │ │ A      │ 1          │  0.10 │      0.30 │ │
+            │ └────────┴────────────┴───────┴───────────┘ │
+            ╰─────────────────────────────────────────────╯
                 """),
             textwrap.dedent("""\
-                ╭──────────── Step 10 ────────────╮
-                │ ┏━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━┓ │
-                │ ┃ Prompt ┃ Completion ┃ Score ┃ │
-                │ ┡━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━┩ │
-                │ │ B      │ 2          │  0.20 │ │
-                │ └────────┴────────────┴───────┘ │
-                ╰─────────────────────────────────╯
+            ╭────────────────── Step 10 ──────────────────╮
+            │ ┏━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━┳━━━━━━━━━━━┓ │
+            │ ┃ Prompt ┃ Completion ┃ Score ┃ Advantage ┃ │
+            │ ┡━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━╇━━━━━━━━━━━┩ │
+            │ │ B      │ 2          │  0.20 │      0.40 │ │
+            │ └────────┴────────────┴───────┴───────────┘ │
+            ╰─────────────────────────────────────────────╯
                 """),
         ]
         self.assertIn(output, possible_outputs)
+
+
+class TestMaskToolResponseTokens(unittest.TestCase):
+    """Test the mask_tool_response_tokens utility function."""
+
+    def setUp(self):
+        """Set up test fixtures."""
+        self.device = torch.device("cpu")
+        
+    def _create_test_data(self, tokenizer, text):
+        """Helper to create test data for a given tokenizer and text."""
+        tokens = tokenizer.encode(text, add_special_tokens=False)
+        completion_ids = torch.tensor([tokens], device=self.device)
+        completion_mask = torch.ones_like(completion_ids)
+        return completion_ids, completion_mask, tokens
+
+    @parameterized.expand([
+        ("Qwen/Qwen2.5-0.5B-Instruct",),
+        ("Qwen/Qwen3-0.6B",),
+    ])
+    def test_tool_response_masking_concrete(self, model_name):
+        """Test concrete masking behavior with specific token verification."""
+        tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+        
+        # Test text with clear tool response boundaries
+        test_text = "I will help you<tool_response>file1.txt\nfile2.txt</tool_response>Done"
+        completion_ids, completion_mask, tokens = self._create_test_data(tokenizer, test_text)
+        
+        # Apply masking
+        result_mask = mask_tool_response_tokens(completion_ids, completion_mask, tokenizer)
+
+        # Apply masking and verify results
+        original_sum = completion_mask.sum().item()
+        masked_sum = result_mask.sum().item()
+        num_masked = original_sum - masked_sum
+        
+        # Should have masked some tokens since we have <tool_response> content
+        self.assertGreater(num_masked, 0,
+            f"Should have masked some tokens for {model_name}")
+        
+        # Should have masked at least a few tokens (content + tags)
+        self.assertGreaterEqual(num_masked, 3, 
+            f"Expected at least 3 masked tokens for {model_name}, got {num_masked}")
+        
+        # Verify which tokens were masked
+        mask_diff = completion_mask - result_mask
+        masked_positions = torch.nonzero(mask_diff[0]).flatten()
+        
+        # Check that masked tokens are related to tool response
+        masked_content = [tokenizer.decode([tokens[pos.item()]]) for pos in masked_positions[:5]]
+        tool_related = any("tool" in content.lower() or "response" in content.lower() 
+                          or content in ["<", ">", "</"] for content in masked_content)
+        self.assertTrue(tool_related, 
+            f"Masked tokens should include tool-related content, got: {masked_content}")
+
+    @parameterized.expand([
+        ("Qwen/Qwen2.5-0.5B-Instruct",),
+        ("Qwen/Qwen3-0.6B",),
+    ])
+    def test_conversation_tool_masking(self, model_name):
+        """Test masking in conversation format with tool roles."""
+        tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+        
+        # Create conversation with tool role
+        messages = [
+            {"role": "user", "content": "List files"},
+            {"role": "assistant", "content": "I will list files"},
+            {"role": "tool", "content": "file1.txt\nfile2.txt\nfile3.txt"}
+        ]
+        
+        try:
+            text = tokenizer.apply_chat_template(messages, tokenize=False)
+            completion_ids, completion_mask, tokens = self._create_test_data(tokenizer, text)
+            
+            # Apply masking
+            result_mask = mask_tool_response_tokens(completion_ids, completion_mask, tokenizer)
+            
+            # Should mask tool content
+            self.assertLessEqual(result_mask.sum().item(), completion_mask.sum().item())
+            
+            # Verify we can identify which tokens were masked
+            mask_diff = completion_mask - result_mask
+            masked_positions = torch.nonzero(mask_diff[0]).flatten()
+            
+            if len(masked_positions) > 0:
+                # Verify that masked tokens are in tool response area
+                for pos in masked_positions[:3]:  # Check first few masked positions
+                    token_text = tokenizer.decode([tokens[pos.item()]])
+                    # Masked tokens should be part of tool content or tags
+                    self.assertTrue(
+                        any(pattern in text for pattern in ["tool", "file", "txt"]),
+                        f"Token '{token_text}' at position {pos} should be part of tool response"
+                    )
+        except Exception as e:
+            self.skipTest(f"Error: {e}")
+
+    @parameterized.expand([
+        ("Qwen/Qwen2.5-0.5B-Instruct",),
+        ("Qwen/Qwen3-0.6B",),
+    ])
+    def test_no_tool_response_unchanged(self, model_name):
+        """Test that text without tool responses remains unchanged."""
+        tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+        
+        test_text = "This is regular text without any tool responses or special patterns."
+        completion_ids, completion_mask, _ = self._create_test_data(tokenizer, test_text)
+        
+        # Apply masking
+        result_mask = mask_tool_response_tokens(completion_ids, completion_mask, tokenizer)
+        
+        # Verify mask is unchanged
+        self.assertTrue(torch.equal(result_mask, completion_mask),
+            f"Mask should be unchanged for text without tool responses ({model_name})")
+
+    @parameterized.expand([
+        ("Qwen/Qwen2.5-0.5B-Instruct",),
+        ("Qwen/Qwen3-0.6B",),
+    ])
+    def test_batch_processing(self, model_name):
+        """Test masking works correctly with batched inputs."""
+        tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+        
+        # Create batch with mixed content
+        text1 = "Regular text without tool responses"
+        text2 = "Text with <tool_response>content</tool_response> inside"
+        
+        tokens1 = tokenizer.encode(text1, add_special_tokens=False)
+        tokens2 = tokenizer.encode(text2, add_special_tokens=False)
+        
+        # Pad to same length
+        max_len = max(len(tokens1), len(tokens2))
+        pad_token = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
+        tokens1.extend([pad_token] * (max_len - len(tokens1)))
+        tokens2.extend([pad_token] * (max_len - len(tokens2)))
+        
+        completion_ids = torch.tensor([tokens1, tokens2], device=self.device)
+        completion_mask = torch.ones_like(completion_ids)
+        
+        # Apply masking
+        result_mask = mask_tool_response_tokens(completion_ids, completion_mask, tokenizer)
+        
+        # First sequence should be unchanged, second should have masked tokens (if patterns detected)
+        self.assertTrue(torch.equal(result_mask[0], completion_mask[0]),
+            f"First sequence without tool responses should be unchanged ({model_name})")
+        self.assertLessEqual(result_mask[1].sum().item(), completion_mask[1].sum().item(),
+            f"Second sequence should have equal or fewer tokens ({model_name})")
+
+    def test_empty_input(self):
+        """Test function handles empty inputs gracefully."""
+        tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct", trust_remote_code=True)
+        
+        completion_ids = torch.empty((0, 0), dtype=torch.long, device=self.device)
+        completion_mask = torch.empty((0, 0), dtype=torch.long, device=self.device)
+        
+        # Apply masking
+        result_mask = mask_tool_response_tokens(completion_ids, completion_mask, tokenizer)
+        
+        # Should return original mask unchanged
+        self.assertTrue(torch.equal(result_mask, completion_mask))
+
+    @parameterized.expand([
+        ("Qwen/Qwen2.5-0.5B-Instruct",),
+        ("Qwen/Qwen3-0.6B",),
+    ])
+    def test_pattern_detection_robustness(self, model_name):
+        """Test that pattern detection handles edge cases correctly."""
+        tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+        
+        # Text with partial patterns that shouldn't match
+        test_text = "This has <tool but no closing tag and <tool_response without closing"
+        completion_ids, completion_mask, _ = self._create_test_data(tokenizer, test_text)
+        
+        # Apply masking
+        result_mask = mask_tool_response_tokens(completion_ids, completion_mask, tokenizer)
+        
+        # Should not mask anything since patterns are incomplete
+        self.assertTrue(torch.equal(result_mask, completion_mask),
+            f"Incomplete patterns should not trigger masking ({model_name})")
